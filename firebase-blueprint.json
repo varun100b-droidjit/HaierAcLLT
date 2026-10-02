@@ -1,0 +1,190 @@
+{
+  "entities": {
+    "megha_chat_records": {
+      "title": "Megha Chat Records",
+      "description": "Stores user and Megha AI chat and voice conversation messages in real-time",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sender": { "type": "string", "enum": ["user", "megha"] },
+        "text": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "dateTimeIso": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "sender", "text", "timestamp"]
+    },
+    "graphValueSheets": {
+      "title": "Graph Value Sheets",
+      "description": "Stores uploaded Excel value sheets metadata and parsed test measurement rows",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fileName": { "type": "string" },
+        "fileSize": { "type": "number" },
+        "uploadedBy": { "type": "string" },
+        "uploadedAt": { "type": "string" },
+        "storagePath": { "type": "string" },
+        "status": { "type": "string" },
+        "rowCount": { "type": "number" },
+        "columnCount": { "type": "number" },
+        "columns": { "type": "array" },
+        "timeColumn": { "type": "string" }
+      },
+      "required": ["id", "fileName", "rowCount", "columnCount"]
+    },
+    "master_templates": {
+      "title": "Master Report Templates",
+      "description": "Stores uploaded official DOCX Master Report templates synchronized across devices via Firebase",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "reportType": { "type": "string" },
+        "fileName": { "type": "string" },
+        "fileSize": { "type": "number" },
+        "uploadedAt": { "type": "string" },
+        "base64Data": { "type": "string" },
+        "chunks": { "type": "array" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "reportType", "fileName", "fileSize"]
+    },
+    "users": {
+      "title": "Application Users",
+      "description": "Stores user authorization profiles, roles, and status for Role-Based Access Control",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "userId": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "random"] },
+        "status": { "type": "string", "enum": ["active", "disabled", "deleted"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["name", "userId", "role", "status"]
+    },
+    "model_master": {
+      "title": "Model Master",
+      "description": "Stores model names mapped to material codes / model prefix for barcode scanner auto-fill",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "modelName": { "type": "string" },
+        "materialCode": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["modelName", "materialCode"]
+    },
+    "elt_records": {
+      "title": "ELT Records",
+      "description": "Stores machines currently sent to ELT awaiting BSR return",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "modelName": { "type": "string" },
+        "materialCode": { "type": "string" },
+        "serialNumber": { "type": "string" },
+        "processType": { "type": "string" },
+        "status": { "type": "string" },
+        "eltDate": { "type": "string" },
+        "eltTime": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["serialNumber", "modelName", "materialCode", "processType", "status"]
+    },
+    "bsr_records": {
+      "title": "BSR Records",
+      "description": "Stores machines returned from BSR transferred from ELT",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "modelName": { "type": "string" },
+        "materialCode": { "type": "string" },
+        "serialNumber": { "type": "string" },
+        "processType": { "type": "string" },
+        "status": { "type": "string" },
+        "originalELTDateTime": { "type": "string" },
+        "bsrReturnDateTime": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["serialNumber", "modelName", "materialCode", "processType", "status"]
+    },
+    "smog_leak_units": {
+      "title": "Smog Leak Units",
+      "description": "Stores leak unit records and inspection verification data logged in the Smog section",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "smogPerson": { "type": "string" },
+        "shift": { "type": "string", "enum": ["A", "B", "C"] },
+        "modelName": { "type": "string" },
+        "serialNumbers": { "type": "array" },
+        "passedSerials": { "type": "array" },
+        "suspectCount": { "type": "number" },
+        "actualCount": { "type": "number" },
+        "date": { "type": "string" },
+        "month": { "type": "string" },
+        "time": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "notes": { "type": "string" },
+        "productionDate": { "type": "string" },
+        "smogDate": { "type": "string" },
+        "operatorUserId": { "type": "string" },
+        "location": { "type": "string" },
+        "qty": { "type": "number" }
+      },
+      "required": ["id", "shift", "serialNumbers", "suspectCount", "actualCount", "date", "createdAt"]
+    },
+    "smog_qty_records": {
+      "title": "Smog Qty Records",
+      "description": "Stores smog production quantity entries entered per shift and date in the Smog section",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" },
+        "shift": { "type": "string", "enum": ["A", "B", "C"] },
+        "smogQty": { "type": "number" },
+        "prQty": { "type": "number" },
+        "pendingQty": { "type": "number" },
+        "models": { "type": "array" },
+        "isClosed": { "type": "boolean" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "date", "shift", "smogQty", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/master_templates/{reportType}": {
+      "schema": "master_templates",
+      "description": "DOCX Master Template files indexed by reportType (proto, reliability, etc)"
+    },
+    "/users/{uid}": {
+      "schema": "users",
+      "description": "User authorization profile records keyed by Firebase Auth UID"
+    },
+    "/model_master/{modelId}": {
+      "schema": "model_master",
+      "description": "Master mapping of model names to 9-char material codes"
+    },
+    "/elt_records/{recordId}": {
+      "schema": "elt_records",
+      "description": "Units dispatched to ELT"
+    },
+    "/bsr_records/{recordId}": {
+      "schema": "bsr_records",
+      "description": "Units returned from BSR"
+    },
+    "/smog_leak_units/{recordId}": {
+      "schema": "smog_leak_units",
+      "description": "Leak unit cards and inspection records in the Smog section"
+    },
+    "/smog_qty_records/{recordId}": {
+      "schema": "smog_qty_records",
+      "description": "Smog production quantity records entered per shift and date"
+    }
+  }
+}

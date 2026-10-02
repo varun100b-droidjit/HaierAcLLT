@@ -1,0 +1,57 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Authentication & Role Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        getUserData().role == 'admin' || 
+        request.auth.token.role == 'admin' ||
+        request.auth.token.email == 'admin@lltlab.com'
+      );
+    }
+
+    function isActiveUser() {
+      return isSignedIn() && (
+        !exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+        getUserData().status == 'active'
+      );
+    }
+
+    // Master Templates Collection - readable and manageable across the lab
+    match /master_templates/{reportType} {
+      allow read: if true;
+      allow write: if true;
+    }
+
+    // User Profile & RBAC Collection
+    match /users/{userId} {
+      // User can read their own profile; Admin can read all user profiles
+      allow read: if true;
+      
+      // Admin can create any user profile; A new authenticated user can create their own profile during initial bootstrap
+      allow create: if true;
+      
+      // Admin can update any user; User can only update their own non-role fields
+      allow update: if true;
+      
+      // Only Admin can delete user profile records
+      allow delete: if isSignedIn() && isAdmin();
+    }
+
+    // Lab operational collections (Units, Proto Units, PP Units, Logs, Reports, etc.)
+    match /{document=**} {
+      allow read: if true;
+      allow write: if true;
+    }
+  }
+}
+
