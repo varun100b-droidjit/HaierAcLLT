@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Modality } from '@google/genai';
@@ -404,6 +405,72 @@ No backticks, no markdown formatting, just pure JSON array.`;
     } catch (err: any) {
       console.error('Smog OCR extraction error:', err);
       return res.status(500).json({ success: false, error: err.message || 'Error processing photo' });
+    }
+  });
+
+  // Smog Qty Records server-side persistence fallback & backup
+  const smogQtyBackupDir = path.join(process.cwd(), '.data');
+  const smogQtyBackupFile = path.join(smogQtyBackupDir, 'smog_qty_records.json');
+
+  const getSmogQtyBackup = (): any[] => {
+    try {
+      if (fs.existsSync(smogQtyBackupFile)) {
+        const raw = fs.readFileSync(smogQtyBackupFile, 'utf-8');
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      }
+    } catch (e) {
+      console.warn('Could not read smog qty backup file:', e);
+    }
+    return [];
+  };
+
+  const saveSmogQtyBackup = (records: any[]) => {
+    try {
+      if (!fs.existsSync(smogQtyBackupDir)) {
+        fs.mkdirSync(smogQtyBackupDir, { recursive: true });
+      }
+      fs.writeFileSync(smogQtyBackupFile, JSON.stringify(records, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn('Could not write smog qty backup file:', e);
+    }
+  };
+
+  // Sync / Save Smog Qty record to server backup
+  app.post('/api/smog/sync-qty-record', (req, res) => {
+    try {
+      const record = req.body;
+      if (!record || !record.date || !record.shift) {
+        return res.status(400).json({ success: false, error: 'Date and Shift are required' });
+      }
+      const records = getSmogQtyBackup();
+      const existingIdx = records.findIndex(r => r.date === record.date && r.shift === record.shift);
+      if (existingIdx >= 0) {
+        records[existingIdx] = {
+          ...records[existingIdx],
+          ...record,
+          updatedAt: new Date().toISOString()
+        };
+      } else {
+        records.unshift({
+          ...record,
+          createdAt: record.createdAt || new Date().toISOString()
+        });
+      }
+      saveSmogQtyBackup(records);
+      return res.json({ success: true, count: records.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Retrieve all Smog Qty records from server backup
+  app.get('/api/smog/qty-records', (_req, res) => {
+    try {
+      const records = getSmogQtyBackup();
+      return res.json({ success: true, records });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
     }
   });
 

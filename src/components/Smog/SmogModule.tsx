@@ -278,12 +278,25 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
   onShiftFilterChange,
 }) => {
   const todayStr = new Date().toISOString().split('T')[0];
+  const storedDate = typeof window !== 'undefined' ? localStorage.getItem('smog_scanner_production_date') : null;
+  const storedShift = typeof window !== 'undefined' ? (localStorage.getItem('smog_active_shift') as 'A' | 'B' | null) : null;
+
   const [leakRecords, setLeakRecords] = useState<LeakUnitRecord[]>(getSmogUnits());
   const [searchQuery, setSearchQuery] = useState('');
-  const [shiftFilter, setShiftFilter] = useState<'all' | 'A' | 'B'>(selectedShiftFilter);
-  const [selectedDate, setSelectedDate] = useState<string>(todayStr);
+  const [shiftFilter, setShiftFilter] = useState<'all' | 'A' | 'B'>(
+    storedShift || (selectedShiftFilter !== 'all' ? selectedShiftFilter : 'all')
+  );
+  const [selectedDate, setSelectedDate] = useState<string>(storedDate || todayStr);
   const [supabaseStatus, setSupabaseStatus] = useState<'connected' | 'syncing' | 'idle'>('idle');
   const [toastNotification, setToastNotification] = useState<string | null>(null);
+
+  // Synchronize date selection with localStorage
+  const handleSelectDate = (d: string) => {
+    setSelectedDate(d);
+    try {
+      if (d) localStorage.setItem('smog_scanner_production_date', d);
+    } catch {}
+  };
 
   // Sync shiftFilter if selectedShiftFilter prop changes from Sidebar
   useEffect(() => {
@@ -295,6 +308,11 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
   const handleSelectShiftFilter = (newShift: 'all' | 'A' | 'B') => {
     setShiftFilter(newShift);
     onShiftFilterChange?.(newShift);
+    try {
+      if (newShift === 'A' || newShift === 'B') {
+        localStorage.setItem('smog_active_shift', newShift);
+      }
+    } catch {}
   };
 
   // Add Leak Modal State
@@ -797,7 +815,7 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
         <div className="flex items-center gap-1.5 shrink-0 z-10 min-w-0">
           <SmogUniqueCalendar
             selectedDate={selectedDate}
-            onSelectDate={(d) => setSelectedDate(d)}
+            onSelectDate={(d) => handleSelectDate(d)}
             records={leakRecords}
           />
         </div>
@@ -1959,7 +1977,7 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
         onOpenSuspectManagement={() => setIsSmogQtyModalOpen(false)}
         defaultDate={selectedDate || new Date().toISOString().split('T')[0]}
         defaultShift={shiftFilter !== 'all' ? shiftFilter : 'A'}
-        onDateChange={(d) => setSelectedDate(d)}
+        onDateChange={(d) => handleSelectDate(d)}
         onShiftChange={(s) => handleSelectShiftFilter(s)}
         onSaved={(saved) => {
           setToastNotification(`Smog Qty (${saved.smogQty}) successfully uploaded for ${saved.date} (Shift ${saved.shift})`);

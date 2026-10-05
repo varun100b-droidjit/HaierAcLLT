@@ -28,6 +28,8 @@ import {
   saveSmogQtyRecord, 
   getSmogQtyRecords, 
   fetchSmogQtyRecordByDateAndShift,
+  syncSmogQtyToFirestore,
+  subscribeSmogQtyRecords,
   SmogQtyRecord 
 } from '../../services/smogQtyStore';
 import { audioAlarm } from '../../utils/audioAlarm';
@@ -166,7 +168,7 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
   const isPhotoActionDisabled = !isCameraEnabled || isScanning || hasModels;
 
   // Helper to persist current form state (Date, Shift, Models, Quantities, Notes) to Firebase Firestore & localStorage
-  const persistSmogQtyState = (
+  const persistSmogQtyState = async (
     currentModels: LocalHsoModel[],
     overrideNotes?: string,
     isClosedState: boolean = false
@@ -187,6 +189,12 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
 
     const finalNotes = overrideNotes !== undefined ? overrideNotes : notes;
 
+    // Cache active date and shift so refresh lands on the exact same date and shift
+    try {
+      localStorage.setItem('smog_scanner_production_date', date);
+      localStorage.setItem('smog_active_shift', normShift);
+    } catch {}
+
     const saved = saveSmogQtyRecord({
       date,
       shift: normShift,
@@ -198,14 +206,27 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
       isClosed: isClosedState
     });
 
+    // Explicitly await sync to Firebase Firestore so data is guaranteed stored in Firebase
+    try {
+      await syncSmogQtyToFirestore(saved);
+    } catch (e) {
+      console.warn('Direct sync to Firebase note:', e);
+    }
+
     return saved;
   };
 
   // Load existing records if any when screen opens
   useEffect(() => {
     if (isOpen) {
-      const initialDate = defaultDate || today;
-      const initialShift: 'A' | 'B' = (defaultShift && defaultShift === 'B') ? 'B' : 'A';
+      const storedDate = typeof window !== 'undefined' ? localStorage.getItem('smog_scanner_production_date') : null;
+      const storedShift = typeof window !== 'undefined' ? localStorage.getItem('smog_active_shift') : null;
+
+      const initialDate = defaultDate || storedDate || today;
+      const initialShift: 'A' | 'B' = (defaultShift && defaultShift === 'B') 
+        ? 'B' 
+        : (storedShift === 'B' ? 'B' : 'A');
+
       setDate(initialDate);
       setShift(initialShift);
       setNotes('');
@@ -214,6 +235,11 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
       setPopupModel(null);
       setShowDateShiftPrompt(false);
       setPendingPhotoAction(null);
+
+      try {
+        localStorage.setItem('smog_scanner_production_date', initialDate);
+        localStorage.setItem('smog_active_shift', initialShift);
+      } catch {}
 
       // Check if there is already an existing record for this date & shift
       const allRecords = getSmogQtyRecords();
@@ -239,9 +265,7 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
           setClosedRecord(null);
         }
       } else {
-        setHsoModels([]);
-        setClosedRecord(null);
-        // Query Firestore as server database fallback
+        // Query Firestore & server database as cloud fallback
         fetchSmogQtyRecordByDateAndShift(initialDate, initialShift, true).then((remote) => {
           if (remote && remote.models && remote.models.length > 0) {
             const loaded = (remote.models || []).map((m: any, idx: number) => {
@@ -267,6 +291,34 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
     }
   }, [isOpen, defaultDate, defaultShift, today]);
 
+  // Subscribe to background store updates (e.g. from Firebase Firestore realtime listener or broadcast)
+  useEffect(() => {
+    if (!isOpen || !date || !shift) return;
+    const unsub = subscribeSmogQtyRecords((allRecords) => {
+      const match = allRecords.find(r => r.date === date && r.shift === shift);
+      if (match && match.models && match.models.length > 0) {
+        setHsoModels((prev) => {
+          // If current local models list is empty, or remote has populated models
+          if (prev.length === 0) {
+            return (match.models || []).map((m: any, idx: number) => ({
+              id: `hso-${idx}-${Date.now()}`,
+              modelName: m.modelName,
+              prQty: Number(m.prQty ?? m.qty) || 0,
+              smogQty: Number(m.smogQty) || 0,
+              pendingQty: m.pendingQty !== undefined 
+                ? Number(m.pendingQty) 
+                : Math.max(0, (Number(m.prQty ?? m.qty) || 0) - (Number(m.smogQty) || 0))
+            }));
+          }
+          return prev;
+        });
+        if (match.notes && !notes) setNotes(match.notes);
+        if (match.isClosed) setClosedRecord(match);
+      }
+    });
+    return () => unsub();
+  }, [isOpen, date, shift]);
+
   // When date or shift changes, refresh existing models if available
   const handleDateOrShiftChange = (newDate: string, newShift: 'A' | 'B' | '') => {
     setDate(newDate);
@@ -276,8 +328,14 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
     setShowDateShiftPrompt(false);
     setPendingPhotoAction(null);
 
-    if (newDate) onDateChange?.(newDate);
-    if (newShift === 'A' || newShift === 'B') onShiftChange?.(newShift);
+    if (newDate) {
+      onDateChange?.(newDate);
+      try { localStorage.setItem('smog_scanner_production_date', newDate); } catch {}
+    }
+    if (newShift === 'A' || newShift === 'B') {
+      onShiftChange?.(newShift);
+      try { localStorage.setItem('smog_active_shift', newShift); } catch {}
+    }
 
     if (newDate && (newShift === 'A' || newShift === 'B')) {
       const allRecords = getSmogQtyRecords();
@@ -657,8 +715,8 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
         setHsoModels(formatted);
         const scannedTotalPr = formatted.reduce((s, m) => s + m.prQty, 0);
 
-        // Instantly save to Firebase Firestore & local storage
-        persistSmogQtyState(formatted, notes, false);
+        // Instantly save to Firebase Firestore, server backup & local storage
+        await persistSmogQtyState(formatted, notes, false);
 
         setScanSuccessMessage(
           `Extracted ${formatted.length} HSO Models (${scannedTotalPr} Pr. Qty) & Saved to Server (Firebase). Photo deleted.`
@@ -737,7 +795,7 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
   };
 
   // Submit Operation Close
-  const handleOperationClose = (e: React.FormEvent) => {
+  const handleOperationClose = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!date) {
@@ -759,7 +817,7 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
     setError(null);
 
     try {
-      const record = persistSmogQtyState(hsoModels, notes, true);
+      const record = await persistSmogQtyState(hsoModels, notes, true);
 
       if (record) {
         setClosedRecord(record);
