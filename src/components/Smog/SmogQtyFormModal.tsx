@@ -507,6 +507,49 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
     });
   };
 
+  // Parse model names and quantities from OCR raw text
+  const parseModelsFromOcrText = (rawText: string): Array<{ modelName: string; qty: number; prQty: number }> => {
+    const lines = rawText.split('\n');
+    const results: Array<{ modelName: string; qty: number; prQty: number }> = [];
+    const seenModels = new Set<string>();
+
+    for (const line of lines) {
+      let cleanLine = line.trim();
+      if (!cleanLine) continue;
+      // Strip leading list index like "1.", "1)", "[1]"
+      cleanLine = cleanLine.replace(/^\s*\[?\d+\]?[\.\)\-\:\s]+\s*/, '');
+      
+      // Pattern looking for HSO or model code (e.g. HSO17-3NB-I:AC, HSO18, HS18...)
+      const modelMatch = cleanLine.match(/(HSO[A-Z0-9_\-:]+)/i) || 
+                         cleanLine.match(/([A-Z0-9]{3,}(?:-[A-Z0-9]+)+(:[A-Z0-9]+)?)/i);
+
+      if (modelMatch) {
+        const modelName = modelMatch[1].toUpperCase().replace(/[:\-_\.\s]+$/, '');
+        if (modelName.length > 2 && !seenModels.has(modelName)) {
+          seenModels.add(modelName);
+
+          // Look for quantity in parentheses e.g. "(900)"
+          const parenMatch = cleanLine.match(/\((\d{1,6})\)/);
+          let qty = 0;
+          if (parenMatch) {
+            qty = parseInt(parenMatch[1], 10);
+          } else {
+            // Look for number following the model name
+            const idx = cleanLine.indexOf(modelMatch[0]) + modelMatch[0].length;
+            const afterModel = cleanLine.slice(idx);
+            const numMatch = afterModel.match(/\b(\d{1,6})\b/);
+            if (numMatch) {
+              qty = parseInt(numMatch[1], 10);
+            }
+          }
+          if (qty <= 0) qty = 100;
+          results.push({ modelName, qty, prQty: qty });
+        }
+      }
+    }
+    return results;
+  };
+
   // Handle Photo Capture / File Selection & AI OCR Extraction
   // "Pr. Qty photo se lega"
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -533,22 +576,58 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
       if (cameraInputRef.current) cameraInputRef.current.value = '';
       if (fileInputRef.current) fileInputRef.current.value = '';
 
-      // 3. Send to server OCR endpoint
-      const response = await fetch('/api/smog/extract-hso-models', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          imageBase64: base64Data,
-          mimeType
-        })
-      });
+      // 3. Attempt Server OCR Endpoint with safe JSON check (never crash on HTML/404)
+      let extractedItems: Array<{ modelName: string; qty: number; prQty?: number }> = [];
+      let serverErrorMsg: string | null = null;
 
-      const data = await response.json();
+      try {
+        const response = await fetch('/api/smog/extract-hso-models', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            imageBase64: base64Data,
+            mimeType
+          })
+        });
 
-      if (data.success && Array.isArray(data.items) && data.items.length > 0) {
-        const formatted: LocalHsoModel[] = data.items.map((it: { modelName: string; qty: number; prQty?: number }, idx: number) => {
+        const contentType = response.headers.get('content-type') || '';
+        if (response.ok && contentType.includes('application/json')) {
+          const data = await response.json();
+          if (data && data.success && Array.isArray(data.items) && data.items.length > 0) {
+            extractedItems = data.items;
+          } else if (data?.note || data?.error) {
+            serverErrorMsg = data.note || data.error;
+          }
+        } else {
+          console.warn(`Server OCR endpoint returned HTTP ${response.status} (${contentType}). Using in-browser OCR fallback.`);
+        }
+      } catch (netErr) {
+        console.warn('Server OCR fetch notice:', netErr);
+      }
+
+      // 4. In-Browser OCR Fallback (Runs seamlessly on Vercel, static hosts, or when server API is unavailable)
+      if (extractedItems.length === 0) {
+        try {
+          const { createWorker } = await import('tesseract.js');
+          const worker = await createWorker('eng');
+          const ocrResult = await worker.recognize(base64Data);
+          await worker.terminate();
+
+          const ocrText = ocrResult?.data?.text || '';
+          const localParsed = parseModelsFromOcrText(ocrText);
+          if (localParsed.length > 0) {
+            extractedItems = localParsed;
+          }
+        } catch (tessErr) {
+          console.warn('In-browser Tesseract OCR notice:', tessErr);
+        }
+      }
+
+      // 5. Populate models or display clean friendly notification
+      if (extractedItems.length > 0) {
+        const formatted: LocalHsoModel[] = extractedItems.map((it, idx) => {
           const p = Number(it.prQty ?? it.qty) || 0;
           return {
             id: `hso-${Date.now()}-${idx}`,
@@ -571,14 +650,13 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
         audioAlarm.playPassChime();
       } else {
         setError(
-          data.note || 
-          data.error || 
-          'Photo me se models recognize nahi ho sake. Kripya clear photo lein ya "+ Add Model" se enter karein.'
+          serverErrorMsg || 
+          'Photo me se models recognize nahi ho sake. Kripya display/sheet ki clear photo lein ya "+ Add Model" se enter karein.'
         );
       }
     } catch (err: any) {
       console.error('Error during OCR extraction:', err);
-      setError(err?.message || 'Network or server error while scanning photo. You can add models manually below.');
+      setError('Photo analyze karne me dikkat aayi. Kripya clear photo lein ya "+ Add Model" se manually enter karein.');
     } finally {
       setIsScanning(false);
       if (e.target) {
