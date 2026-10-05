@@ -36,23 +36,23 @@ export default async function handler(req: any, res: any) {
     });
 
     const cleanBase64 = String(imageBase64).replace(/^data:[^;]+;base64,/, '').trim();
-    const prompt = `You are an expert OCR vision specialist analyzing an industrial/manufacturing spreadsheet, label, screen, or paperwork.
+    const prompt = `You are an expert OCR vision specialist analyzing an industrial/manufacturing spreadsheet, screen, or label.
 Examine this image carefully.
-Look for any model names, machine series codes, and their associated quantities (e.g. production qty, planned qty, numbers in parentheses like "(900)" or in columns like Qty / Count).
+Look for any outdoor AC models and their associated quantities (e.g. production qty, planned qty, numbers in parentheses like "(900)" or in columns like Qty / Count).
 
-CRITICAL INSTRUCTIONS:
-1. Identify all models and their production quantities listed in the image.
-   - If outdoor smog models starting with or containing "HSO" are present (e.g. "HSO17-3NB-I:AC", "HSO18-3NB-I:AC", "HSO19-5NB-I:AC", "HSO52-3NB-I:AC", "HSO52-5NB-I:AC"), extract them with highest priority.
-   - If other model codes are listed with quantities (e.g., "HS18", "18-3NB", "HSO17", etc.), extract them as well.
-2. For each model:
-   - "modelName": Clean, exact model name string (e.g. "HSO17-3NB-I:AC" or "HSO18-3NB-I:AC").
-   - "qty": The positive integer quantity (e.g. 900, 460, 150).
-3. Ignore header rows or summaries like "Total", "Grand Total", "(All)".
+STRICT CRITICAL INSTRUCTIONS:
+1. EXTRACT ONLY MODELS WHOSE NAME STARTS WITH "HSO" (case-insensitive, e.g. "HSO17-3NB-I:AC", "HSO18-3NB-I:AC", "HSO24-3", "HSO24-3N", "HSO52-3NB-I:AC", etc.).
+2. COMPLETELY IGNORE all other models such as those starting with "HSI" (e.g. HSI17N, HSI18CP), "HTO", or anything that does not start with "HSO". ONLY extract models starting with "HSO".
+3. If the image has OCR ambiguity where "HSO" looks like "HS0" (digit zero), normalize it to "HSO".
+4. For each matching HSO model:
+   - "modelName": Exact clean model name starting with HSO (e.g. "HSO24-3", "HSO18-3NB-I:AC").
+   - "qty": The positive integer quantity (e.g. 900, 460, 100).
+5. If the same HSO model appears multiple times, combine its total quantity.
 
 OUTPUT FORMAT:
-Return ONLY a valid JSON array of objects, strictly in this format:
+Return ONLY a valid JSON array of objects:
 [
-  { "modelName": "HSO17-3NB-I:AC", "qty": 900 },
+  { "modelName": "HSO24-3", "qty": 99 },
   { "modelName": "HSO18-3NB-I:AC", "qty": 460 }
 ]
 No backticks, no markdown formatting, just pure JSON array.`;
@@ -85,19 +85,24 @@ No backticks, no markdown formatting, just pure JSON array.`;
       }
 
       if (Array.isArray(parsed) && parsed.length > 0) {
-        const hsoList = parsed.filter(item => 
-          item && typeof item.modelName === 'string' && /HSO/i.test(item.modelName)
-        );
-        const chosenList = hsoList.length > 0 ? hsoList : parsed.filter(item => 
-          item && typeof item.modelName === 'string' && 
-          !/^(total|grand total|all|summary)$/i.test(item.modelName.trim()) &&
-          item.modelName.trim().length > 1
-        );
-        extractedData = chosenList.map(item => {
-          const cleanName = String(item.modelName || '').trim().toUpperCase();
-          const q = Math.max(1, parseInt(String(item.prQty ?? item.qty), 10) || 0);
-          return { modelName: cleanName, qty: q, prQty: q };
-        }).filter(item => item.modelName.length > 1 && item.qty > 0);
+        const aggregatedMap = new Map<string, number>();
+
+        for (const item of parsed) {
+          if (!item || typeof item.modelName !== 'string') continue;
+          let cleanName = String(item.modelName).trim().toUpperCase().replace(/^HS0/i, 'HSO').replace(/[:\-_\.\,\s]+$/, '');
+          // Strict requirement: MUST start with HSO
+          if (cleanName.startsWith('HSO') && cleanName.length >= 4) {
+            const q = Math.max(1, parseInt(String(item.prQty ?? item.qty), 10) || 0);
+            const current = aggregatedMap.get(cleanName) || 0;
+            aggregatedMap.set(cleanName, current + q);
+          }
+        }
+
+        extractedData = Array.from(aggregatedMap.entries()).map(([modelName, qty]) => ({
+          modelName,
+          qty,
+          prQty: qty
+        }));
       }
     }
 

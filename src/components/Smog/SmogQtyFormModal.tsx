@@ -507,11 +507,10 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
     });
   };
 
-  // Parse model names and quantities from OCR raw text
+  // Parse model names and quantities from OCR raw text (Strictly ONLY models starting with "HSO")
   const parseModelsFromOcrText = (rawText: string): Array<{ modelName: string; qty: number; prQty: number }> => {
     const lines = rawText.split('\n');
-    const results: Array<{ modelName: string; qty: number; prQty: number }> = [];
-    const seenModels = new Set<string>();
+    const aggregatedMap = new Map<string, number>();
 
     for (const line of lines) {
       let cleanLine = line.trim();
@@ -519,15 +518,15 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
       // Strip leading list index like "1.", "1)", "[1]"
       cleanLine = cleanLine.replace(/^\s*\[?\d+\]?[\.\)\-\:\s]+\s*/, '');
       
-      // Pattern looking for HSO or model code (e.g. HSO17-3NB-I:AC, HSO18, HS18...)
-      const modelMatch = cleanLine.match(/(HSO[A-Z0-9_\-:]+)/i) || 
-                         cleanLine.match(/([A-Z0-9]{3,}(?:-[A-Z0-9]+)+(:[A-Z0-9]+)?)/i);
+      // Strict regex matching ONLY models starting with HSO or HS0 (where 0 is OCR typo for O)
+      const modelMatch = cleanLine.match(/\b(HS[O0][A-Z0-9_\-:]+)/i);
 
       if (modelMatch) {
-        const modelName = modelMatch[1].toUpperCase().replace(/[:\-_\.\s]+$/, '');
-        if (modelName.length > 2 && !seenModels.has(modelName)) {
-          seenModels.add(modelName);
-
+        // Normalize HS0 -> HSO and strip trailing punctuation
+        let modelName = modelMatch[1].toUpperCase().replace(/^HS0/i, 'HSO').replace(/[:\-_\.\,\s]+$/, '');
+        
+        // Strict guard: MUST start with HSO
+        if (modelName.startsWith('HSO') && modelName.length >= 4) {
           // Look for quantity in parentheses e.g. "(900)"
           const parenMatch = cleanLine.match(/\((\d{1,6})\)/);
           let qty = 0;
@@ -542,12 +541,18 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
               qty = parseInt(numMatch[1], 10);
             }
           }
-          if (qty <= 0) qty = 100;
-          results.push({ modelName, qty, prQty: qty });
+          if (qty <= 0) qty = 1;
+          const current = aggregatedMap.get(modelName) || 0;
+          aggregatedMap.set(modelName, current + qty);
         }
       }
     }
-    return results;
+
+    return Array.from(aggregatedMap.entries()).map(([modelName, qty]) => ({
+      modelName,
+      qty,
+      prQty: qty
+    }));
   };
 
   // Handle Photo Capture / File Selection & AI OCR Extraction
@@ -625,19 +630,30 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
         }
       }
 
-      // 5. Populate models or display clean friendly notification
-      if (extractedItems.length > 0) {
-        const formatted: LocalHsoModel[] = extractedItems.map((it, idx) => {
-          const p = Number(it.prQty ?? it.qty) || 0;
-          return {
-            id: `hso-${Date.now()}-${idx}`,
-            modelName: it.modelName.trim().toUpperCase(),
-            prQty: p,
-            smogQty: 0,
-            pendingQty: p
-          };
-        });
+      // 5. Strict Normalization & Aggregation: ONLY models starting with "HSO"
+      const aggregatedMap = new Map<string, number>();
+      for (const it of extractedItems) {
+        if (!it || typeof it.modelName !== 'string') continue;
+        // Normalize HS0 (digit 0) to HSO (letter O)
+        let cleanName = it.modelName.trim().toUpperCase().replace(/^HS0/i, 'HSO').replace(/[:\-_\.\,\s]+$/, '');
+        // Strict requirement: MUST start with HSO
+        if (cleanName.startsWith('HSO') && cleanName.length >= 4) {
+          const q = Math.max(1, parseInt(String(it.prQty ?? it.qty), 10) || 0);
+          const current = aggregatedMap.get(cleanName) || 0;
+          aggregatedMap.set(cleanName, current + q);
+        }
+      }
 
+      const formatted: LocalHsoModel[] = Array.from(aggregatedMap.entries()).map(([modelName, qty], idx) => ({
+        id: `hso-${Date.now()}-${idx}`,
+        modelName,
+        prQty: qty,
+        smogQty: 0,
+        pendingQty: qty
+      }));
+
+      // 6. Populate models or display clean friendly notification
+      if (formatted.length > 0) {
         setHsoModels(formatted);
         const scannedTotalPr = formatted.reduce((s, m) => s + m.prQty, 0);
 
@@ -645,13 +661,13 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
         persistSmogQtyState(formatted, notes, false);
 
         setScanSuccessMessage(
-          `Extracted ${formatted.length} Models (${scannedTotalPr} Pr. Qty) & Saved to Server (Firebase). Photo deleted.`
+          `Extracted ${formatted.length} HSO Models (${scannedTotalPr} Pr. Qty) & Saved to Server (Firebase). Photo deleted.`
         );
         audioAlarm.playPassChime();
       } else {
         setError(
           serverErrorMsg || 
-          'Photo me se models recognize nahi ho sake. Kripya display/sheet ki clear photo lein ya "+ Add Model" se enter karein.'
+          'Photo me se "HSO" se start hone wale models nahi mile. Kripya HSO models wali sheet/display ki clear photo lein ya "+ Add Model" se manually enter karein.'
         );
       }
     } catch (err: any) {
