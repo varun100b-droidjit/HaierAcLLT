@@ -146,9 +146,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 }) => {
   // Active Section for Section-wise Analysis ('proto' | 'pp' | 'field' | 'rd' | 'smog')
   const [activeSection, setActiveSection] = useState<'proto' | 'pp' | 'field' | 'rd' | 'smog'>('proto');
-  // Selected Year & Month Filter for Section Analysis
+  // Selected Year & Month & Date Filter for Section Analysis
   const [selectedYear, setSelectedYear] = useState<string>('All');
   const [selectedMonth, setSelectedMonth] = useState<string>('All');
+  const [selectedDate, setSelectedDate] = useState<string>('All');
   const [isMonthPickerOpen, setIsMonthPickerOpen] = useState<boolean>(false);
   // Monthly chart view preferences
   const [chartType, setChartType] = useState<'area' | 'line' | 'bar'>('area');
@@ -188,14 +189,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const completedUnits = validUnits.filter(u => (u.currentStageIndex ?? 0) >= 9 || u.status === 'completed' || u.status === 'received').length;
   const pendingVerification = validUnits.filter(u => u.status === 'pending_verification' || u.currentStageIndex === 6 || u.currentStageIndex === 7).length;
 
-  // Helper to filter any list of units by Year and/or Month
+  // Helper to filter any list of units by Year, Month, or exact Date
   const filterListByYearMonth = <T extends Record<string, any>>(
     list: T[],
     dateFields: string[],
     yr: string,
-    mo: string
+    mo: string,
+    exactDate: string = 'All'
   ): T[] => {
-    if (yr === 'All' && mo === 'All') return list;
+    if (exactDate === 'All' && yr === 'All' && mo === 'All') return list;
     return list.filter(item => {
       let dateVal: string | null = null;
       for (const field of dateFields) {
@@ -204,6 +206,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           break;
         }
       }
+      if (!dateVal) return false;
+
+      // 1. Exact Date-wise Filter (e.g. 2026-10-02)
+      if (exactDate !== 'All') {
+        const itemDateClean = dateVal.includes('T') ? dateVal.split('T')[0] : dateVal.slice(0, 10);
+        return itemDateClean === exactDate;
+      }
+
+      // 2. Otherwise filter by Year and/or Month
       const { year, monthShort } = extractYearAndMonth(dateVal);
       if (yr !== 'All' && year !== null && year.toString() !== yr) return false;
       if (mo !== 'All' && monthShort !== null && monthShort !== mo) return false;
@@ -216,7 +227,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
     if (activeSection === 'proto') {
-      const filtered = filterListByYearMonth(protoUnits, ['createdAt', 'updatedAt'], selectedYear, selectedMonth);
+      const filtered = filterListByYearMonth(protoUnits, ['createdAt', 'updatedAt'], selectedYear, selectedMonth, selectedDate);
       const total = filtered.length;
       const live = filtered.filter(u => u.status === 'live').length;
       const finished = filtered.filter(u => u.status === 'finished').length;
@@ -249,7 +260,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         monthly
       };
     } else if (activeSection === 'pp') {
-      const filtered = filterListByYearMonth(ppUnits, ['createdAt', 'updatedAt'], selectedYear, selectedMonth) as PpUnit[];
+      const filtered = filterListByYearMonth(ppUnits, ['createdAt', 'updatedAt'], selectedYear, selectedMonth, selectedDate) as PpUnit[];
       const ppCalc = calculatePpUnitMetrics(filtered);
       const total = ppCalc.bothQty;
       const live = ppCalc.liveQty;
@@ -287,7 +298,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         monthly
       };
     } else if (activeSection === 'field') {
-      const filtered = filterListByYearMonth(fieldUnits, ['startDateTime', 'createdAt'], selectedYear, selectedMonth);
+      const filtered = filterListByYearMonth(fieldUnits, ['startDateTime', 'createdAt'], selectedYear, selectedMonth, selectedDate);
       const total = filtered.length;
       const live = filtered.filter(u => u.status === 'live').length;
       const finished = filtered.filter(u => u.status === 'finished').length;
@@ -320,7 +331,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         monthly
       };
     } else if (activeSection === 'rd') {
-      const filtered = filterListByYearMonth(validUnits, ['transferDate', 'createdAt'], selectedYear, selectedMonth) as Unit[];
+      const filtered = filterListByYearMonth(validUnits, ['transferDate', 'createdAt'], selectedYear, selectedMonth, selectedDate) as Unit[];
       const total = filtered.length;
       const stop = filtered.filter(u => isUnitOverdue(u)).length;
       const live = filtered.filter(u => u.status !== 'received' && u.status !== 'completed' && (u.currentStageIndex ?? 0) < 10 && !isUnitOverdue(u)).length;
@@ -354,10 +365,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       };
     } else {
       // Smog Section
-      const filtered = filterListByYearMonth(smogUnits, ['date', 'productionDate', 'createdAt'], selectedYear, selectedMonth);
+      const filtered = filterListByYearMonth(smogUnits, ['date', 'productionDate', 'createdAt'], selectedYear, selectedMonth, selectedDate);
       const totalSuspect = filtered.reduce((sum: number, r: any) => sum + (r.suspectCount || (r.serialNumbers ? r.serialNumbers.length : 0)), 0);
       const totalActual = filtered.reduce((sum: number, r: any) => sum + (r.actualCount || (r.passedSerials ? r.passedSerials.length : 0)), 0);
-      const filteredQty = filterListByYearMonth(smogQtyRecords, ['date', 'createdAt'], selectedYear, selectedMonth);
+      const filteredQty = filterListByYearMonth(smogQtyRecords, ['date', 'createdAt'], selectedYear, selectedMonth, selectedDate);
       const totalSmogQty = filteredQty.reduce((sum: number, r: any) => sum + (Number(r.smogQty) || 0), 0);
 
       const monthly = months.map(m => {
@@ -391,10 +402,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         monthly
       };
     }
-  }, [activeSection, selectedYear, selectedMonth, protoUnits, ppUnits, fieldUnits, smogUnits, smogQtyRecords, validUnits, onNavigateToProtoUnits, onNavigateToPpUnits, onNavigateToFieldUnits, onNavigateToRDUnits, onNavigateToSmog]);
+  }, [activeSection, selectedYear, selectedMonth, selectedDate, protoUnits, ppUnits, fieldUnits, smogUnits, smogQtyRecords, validUnits, onNavigateToProtoUnits, onNavigateToPpUnits, onNavigateToFieldUnits, onNavigateToRDUnits, onNavigateToSmog]);
 
   const smogSectionMetrics = useMemo(() => {
-    const filtered = filterListByYearMonth(smogUnits, ['date', 'productionDate', 'createdAt'], selectedYear, selectedMonth);
+    const filtered = filterListByYearMonth(smogUnits, ['date', 'productionDate', 'createdAt'], selectedYear, selectedMonth, selectedDate);
     const totalSuspect = filtered.reduce((sum: number, r: any) => sum + (r.suspectCount || (r.serialNumbers ? r.serialNumbers.length : 0)), 0);
     const totalActual = filtered.reduce((sum: number, r: any) => sum + (r.actualCount || (r.passedSerials ? r.passedSerials.length : 0)), 0);
 
@@ -407,7 +418,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     );
     const modelQty = uniqueModels.length;
 
-    const filteredSmogQty = filterListByYearMonth(smogQtyRecords, ['date', 'createdAt'], selectedYear, selectedMonth);
+    const filteredSmogQty = filterListByYearMonth(smogQtyRecords, ['date', 'createdAt'], selectedYear, selectedMonth, selectedDate);
     const totalSmogQty = filteredSmogQty.reduce((sum: number, r: any) => sum + (Number(r.smogQty) || 0), 0);
 
     return {
@@ -417,12 +428,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       totalSmogQty,
       recordsCount: filtered.length,
     };
-  }, [smogUnits, smogQtyRecords, selectedYear, selectedMonth]);
+  }, [smogUnits, smogQtyRecords, selectedYear, selectedMonth, selectedDate]);
 
   const ppMetrics = useMemo(() => {
-    const filtered = filterListByYearMonth(ppUnits, ['createdAt', 'updatedAt'], selectedYear, selectedMonth) as PpUnit[];
+    const filtered = filterListByYearMonth(ppUnits, ['createdAt', 'updatedAt'], selectedYear, selectedMonth, selectedDate) as PpUnit[];
     return calculatePpUnitMetrics(filtered);
-  }, [ppUnits, selectedYear, selectedMonth]);
+  }, [ppUnits, selectedYear, selectedMonth, selectedDate]);
 
   // Compute month/year-filtered metrics for the 4 dashboard cards
   const displayedMetrics = useMemo(() => {
@@ -431,13 +442,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       stop: sectionAnalysis.stop,
       live: sectionAnalysis.live,
       finished: sectionAnalysis.finished,
-      monthLabel: selectedYear === 'All' && selectedMonth === 'All' 
+      monthLabel: selectedDate !== 'All'
+        ? `Date: ${selectedDate} Total`
+        : selectedYear === 'All' && selectedMonth === 'All' 
         ? 'Section Total' 
         : selectedYear !== 'All' && selectedMonth === 'All' 
         ? `Year ${selectedYear} Total`
         : `${selectedMonth} ${selectedYear === 'All' ? '' : selectedYear} Total`
     };
-  }, [sectionAnalysis, selectedYear, selectedMonth]);
+  }, [sectionAnalysis, selectedYear, selectedMonth, selectedDate]);
 
   // Chart 1: Stage distribution
   const stageCounts = [
@@ -482,7 +495,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               >
                 <Calendar className="w-3.5 h-3.5 text-cyan-400 group-hover:scale-110 transition-transform shrink-0" />
                 <span>
-                  {selectedYear === 'All' && selectedMonth === 'All'
+                  {selectedDate !== 'All'
+                    ? `📅 Date: ${selectedDate}`
+                    : selectedYear === 'All' && selectedMonth === 'All'
                     ? '📅 All Time'
                     : selectedYear !== 'All' && selectedMonth === 'All'
                     ? `📅 Year ${selectedYear}`
@@ -493,7 +508,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <ChevronDown className={`w-3.5 h-3.5 text-cyan-400 transition-transform duration-200 ${isMonthPickerOpen ? 'rotate-180' : ''}`} />
               </button>
 
-              {/* High Quality Year & Month Selection Popup UI */}
+              {/* High Quality Calendar & Date Selection Popup UI */}
               {isMonthPickerOpen && (
                 <>
                   {/* Backdrop */}
@@ -503,12 +518,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   />
 
                   {/* Dropdown Card */}
-                  <div className="absolute left-0 top-full mt-2 z-50 w-80 p-4 rounded-2xl bg-slate-950/95 backdrop-blur-md border border-cyan-500/40 shadow-[0_10px_35px_rgba(0,0,0,0.9),0_0_20px_rgba(6,182,212,0.2)] animate-in fade-in zoom-in-95 duration-150 space-y-3">
+                  <div className="absolute left-0 top-full mt-2 z-50 w-84 p-4 rounded-2xl bg-slate-950/95 backdrop-blur-md border border-cyan-500/40 shadow-[0_10px_35px_rgba(0,0,0,0.9),0_0_20px_rgba(6,182,212,0.2)] animate-in fade-in zoom-in-95 duration-150 space-y-3.5">
                     <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                       <div className="flex items-center gap-1.5">
                         <Calendar className="w-4 h-4 text-cyan-400 animate-pulse" />
                         <span className="text-xs font-mono font-extrabold uppercase text-cyan-300">
-                          Select Year & Month
+                          Calendar & Date Filter
                         </span>
                       </div>
                       <button
@@ -520,10 +535,92 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       </button>
                     </div>
 
-                    {/* Section 1: Year Selector */}
+                    {/* Section 1: Date-Wise Option (Exact Date Picker) */}
+                    <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800/90 space-y-2">
+                      <div className="text-[10px] font-mono text-cyan-400 font-bold uppercase tracking-wider flex items-center justify-between">
+                        <span>1. Date-Wise Filter (Specific Date)</span>
+                        {selectedDate !== 'All' && (
+                          <span className="text-[9px] text-emerald-400 font-mono font-bold">
+                            Active: {selectedDate}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="date"
+                          value={selectedDate !== 'All' ? selectedDate : ''}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (val) {
+                              setSelectedDate(val);
+                              setSelectedYear('All');
+                              setSelectedMonth('All');
+                            } else {
+                              setSelectedDate('All');
+                            }
+                          }}
+                          className="flex-1 bg-slate-950 border border-slate-700 hover:border-cyan-500 rounded-xl px-2.5 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-cyan-400 cursor-pointer"
+                        />
+                        {selectedDate !== 'All' && (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedDate('All')}
+                            className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-rose-300 text-xs font-mono font-bold cursor-pointer border border-slate-700"
+                            title="Clear Date"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Quick Date Selectors: Today / Yesterday */}
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const today = new Date().toISOString().split('T')[0];
+                            setSelectedDate(today);
+                            setSelectedYear('All');
+                            setSelectedMonth('All');
+                          }}
+                          className={`flex-1 py-1 rounded-lg text-[10px] font-mono font-bold transition-all text-center cursor-pointer border ${
+                            selectedDate === new Date().toISOString().split('T')[0]
+                              ? 'bg-cyan-500 text-slate-950 border-cyan-400 font-black'
+                              : 'bg-slate-950 text-slate-300 hover:text-cyan-300 border-slate-800'
+                          }`}
+                        >
+                          Today
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const d = new Date();
+                            d.setDate(d.getDate() - 1);
+                            const yesterday = d.toISOString().split('T')[0];
+                            setSelectedDate(yesterday);
+                            setSelectedYear('All');
+                            setSelectedMonth('All');
+                          }}
+                          className={`flex-1 py-1 rounded-lg text-[10px] font-mono font-bold transition-all text-center cursor-pointer border ${
+                            selectedDate === (() => {
+                              const d = new Date();
+                              d.setDate(d.getDate() - 1);
+                              return d.toISOString().split('T')[0];
+                            })()
+                              ? 'bg-cyan-500 text-slate-950 border-cyan-400 font-black'
+                              : 'bg-slate-950 text-slate-300 hover:text-cyan-300 border-slate-800'
+                          }`}
+                        >
+                          Yesterday
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Section 2: Year Selector */}
                     <div>
                       <div className="text-[10px] font-mono text-cyan-400 font-bold mb-1.5 uppercase tracking-wider flex items-center justify-between">
-                        <span>1. Filter By Year</span>
+                        <span>2. Filter By Year</span>
                         {selectedYear !== 'All' && <span className="text-[9px] text-cyan-300">Active: {selectedYear}</span>}
                       </div>
                       <div className="grid grid-cols-4 gap-1">
@@ -531,9 +628,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           <button
                             key={yr}
                             type="button"
-                            onClick={() => setSelectedYear(yr)}
+                            onClick={() => {
+                              setSelectedYear(yr);
+                              setSelectedDate('All');
+                            }}
                             className={`px-2 py-1.5 rounded-lg text-xs font-mono font-bold transition-all text-center cursor-pointer ${
-                              selectedYear === yr
+                              selectedYear === yr && selectedDate === 'All'
                                 ? 'bg-cyan-500 text-slate-950 font-extrabold shadow-md shadow-cyan-500/30'
                                 : 'bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-cyan-300 border border-slate-800'
                             }`}
@@ -544,19 +644,22 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Section 2: Month Selector */}
+                    {/* Section 3: Month Selector */}
                     <div>
                       <div className="text-[10px] font-mono text-cyan-400 font-bold mb-1.5 uppercase tracking-wider flex items-center justify-between">
-                        <span>2. Filter By Month</span>
+                        <span>3. Filter By Month</span>
                         {selectedMonth !== 'All' && <span className="text-[9px] text-cyan-300">Active: {selectedMonth}</span>}
                       </div>
 
                       {/* All Months Option */}
                       <button
                         type="button"
-                        onClick={() => setSelectedMonth('All')}
+                        onClick={() => {
+                          setSelectedMonth('All');
+                          setSelectedDate('All');
+                        }}
                         className={`w-full mb-1.5 px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex items-center justify-between transition-all cursor-pointer ${
-                          selectedMonth === 'All'
+                          selectedMonth === 'All' && selectedDate === 'All'
                             ? 'bg-gradient-to-r from-cyan-600 to-blue-600 text-white shadow-md shadow-cyan-900/60 ring-1 ring-cyan-400'
                             : 'bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-cyan-300 border border-slate-800'
                         }`}
@@ -564,7 +667,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         <span className="flex items-center gap-1.5 text-[11px]">
                           <span>📅</span> All Months ({selectedYear === 'All' ? 'Complete' : `Year ${selectedYear}`})
                         </span>
-                        {selectedMonth === 'All' && <Check className="w-3.5 h-3.5 text-white shrink-0" />}
+                        {selectedMonth === 'All' && selectedDate === 'All' && <Check className="w-3.5 h-3.5 text-white shrink-0" />}
                       </button>
 
                       {/* 12 Months Grid */}
@@ -583,13 +686,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           { short: 'Nov', full: 'November' },
                           { short: 'Dec', full: 'December' },
                         ].map((m) => {
-                          const isSelected = selectedMonth === m.short;
+                          const isSelected = selectedMonth === m.short && selectedDate === 'All';
                           const isCurrent = new Date().toLocaleString('en-US', { month: 'short' }) === m.short;
                           return (
                             <button
                               key={m.short}
                               type="button"
-                              onClick={() => setSelectedMonth(m.short)}
+                              onClick={() => {
+                                setSelectedMonth(m.short);
+                                setSelectedDate('All');
+                              }}
                               className={`px-2 py-1.5 rounded-xl text-xs font-mono font-bold transition-all text-center cursor-pointer flex flex-col items-center justify-center relative ${
                                 isSelected
                                   ? 'bg-cyan-500 text-slate-950 font-black shadow-md shadow-cyan-500/40 scale-[1.02]'
@@ -609,23 +715,47 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Done / Apply Button */}
-                    <button
-                      type="button"
-                      onClick={() => setIsMonthPickerOpen(false)}
-                      className="w-full py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-mono font-extrabold text-xs shadow-md shadow-cyan-950/60 active:scale-95 transition-all text-center cursor-pointer"
-                    >
-                      Apply Filter
-                    </button>
+                    {/* Action Buttons: Reset & Apply */}
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedDate('All');
+                          setSelectedYear('All');
+                          setSelectedMonth('All');
+                        }}
+                        className="py-2 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 font-mono font-bold text-xs border border-slate-800 transition-all cursor-pointer"
+                      >
+                        Reset All
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setIsMonthPickerOpen(false)}
+                        className="flex-1 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-mono font-extrabold text-xs shadow-md shadow-cyan-950/60 active:scale-95 transition-all text-center cursor-pointer"
+                      >
+                        Apply Filter
+                      </button>
+                    </div>
                   </div>
                 </>
               )}
             </div>
 
-            {selectedMonth !== 'All' && (
-              <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-cyan-950 text-cyan-300 border border-cyan-800 animate-in fade-in duration-200 hidden sm:inline-block">
-                {selectedMonth} Active
-              </span>
+            {(selectedMonth !== 'All' || selectedYear !== 'All' || selectedDate !== 'All') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedMonth('All');
+                  setSelectedYear('All');
+                  setSelectedDate('All');
+                }}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[10px] font-mono text-slate-400 hover:text-rose-400 transition-all cursor-pointer"
+                title="Reset all date and month filters"
+              >
+                <X className="w-3 h-3" />
+                <span>Reset ({selectedDate !== 'All' ? selectedDate : selectedMonth !== 'All' ? selectedMonth : selectedYear})</span>
+              </button>
             )}
           </div>
 
@@ -1045,7 +1175,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     {smogSectionMetrics.totalSmogQty}
                   </span>
                   <span className="text-[10px] sm:text-xs text-slate-400 font-mono">
-                    {selectedMonth === 'All' ? selectedYear : `${selectedMonth} ${selectedYear}`}
+                    {selectedDate !== 'All' ? selectedDate : selectedMonth === 'All' ? selectedYear : `${selectedMonth} ${selectedYear}`}
                   </span>
                 </div>
                 <div className="mt-2 text-[9px] sm:text-[10px] text-slate-500 font-mono flex items-center justify-between">

@@ -1718,21 +1718,33 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
           <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
             <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-2xl p-6 space-y-5 shadow-2xl my-auto animate-in fade-in zoom-in-95 duration-200">
               {/* Modal Header */}
-              <div className="flex items-center justify-between border-b border-slate-800 pb-3.5">
-                <div className="flex items-center gap-3">
-                  <div className={`p-2.5 rounded-2xl border ${
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3.5 gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <button
+                    onClick={() => {
+                      setSelectedShiftForDetails(null);
+                      setShiftDetailsSearch('');
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-bold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-all cursor-pointer active:scale-95 shrink-0"
+                    title="Back to Smog Main Screen"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5 stroke-[2.5]" />
+                    <span>Back</span>
+                  </button>
+
+                  <div className={`p-2 rounded-xl border shrink-0 ${
                     targetShift === 'A'
                       ? 'bg-cyan-950 border-cyan-800 text-cyan-400'
                       : 'bg-amber-950 border-amber-800 text-amber-400'
                   }`}>
-                    <Layers className="w-5 h-5" />
+                    <Layers className="w-4 h-4" />
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-base font-extrabold text-white">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-sm sm:text-base font-extrabold text-white truncate">
                         Shift {targetShift} Machine Details
                       </h3>
-                      <span className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold border ${
+                      <span className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold border hidden sm:inline-block ${
                         targetShift === 'A'
                           ? 'bg-cyan-950 text-cyan-300 border-cyan-800'
                           : 'bg-amber-950 text-amber-300 border-amber-800'
@@ -1740,7 +1752,7 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
                         {targetShift === 'A' ? '07:00 AM – 07:00 PM' : '07:00 PM – 07:00 AM (Next Day)'}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                    <p className="text-[10px] sm:text-[11px] text-slate-400 font-mono mt-0.5 truncate">
                       Date: <strong className="text-white">{selectedDate || todayStr}</strong> • Total Scans: <strong className="text-white">{flattenedUnits.length}</strong>
                     </p>
                   </div>
@@ -1750,7 +1762,8 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
                     setSelectedShiftForDetails(null);
                     setShiftDetailsSearch('');
                   }}
-                  className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg cursor-pointer"
+                  className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg cursor-pointer shrink-0"
+                  title="Close"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -1839,12 +1852,29 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
                             {unit.time}
                           </span>
                         </div>
-                        <p className="text-sm font-mono font-black text-white tracking-wide truncate">
-                          {unit.serialNumber}
-                        </p>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <p className="text-sm font-mono font-black text-white tracking-wide truncate">
+                            {unit.serialNumber}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCopySerial([unit.serialNumber], `unit-${unit.serialNumber}`);
+                            }}
+                            className="p-1 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800 transition-all cursor-pointer shrink-0"
+                            title="Copy Serial Number"
+                          >
+                            {copiedId === `unit-${unit.serialNumber}` ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-400 stroke-[3]" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
                       </div>
 
-                      <div className="flex items-center gap-2 self-end sm:self-center">
+                      <div className="flex items-center gap-1.5 self-end sm:self-center">
                         <button
                           onClick={() => handleTogglePassSerial(unit.recordId, unit.serialNumber)}
                           className={`px-3 py-1.5 rounded-xl font-mono text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all border ${
@@ -1865,6 +1895,24 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
                             </>
                           )}
                         </button>
+
+                        {/* Copy icon button right next to the Tick / Passed button */}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCopySerial([unit.serialNumber], `unit-${unit.serialNumber}`);
+                          }}
+                          className="p-1.5 rounded-xl bg-slate-900 text-slate-400 hover:text-cyan-300 hover:bg-slate-800 border border-slate-800 hover:border-cyan-500/50 transition-all cursor-pointer"
+                          title="Copy Serial Number"
+                        >
+                          {copiedId === `unit-${unit.serialNumber}` ? (
+                            <Check className="w-4 h-4 text-emerald-400 stroke-[3]" />
+                          ) : (
+                            <Copy className="w-4 h-4" />
+                          )}
+                        </button>
+
                         <button
                           onClick={() => handleDeleteSingleMachineFromShift(unit.recordId, unit.serialNumber)}
                           className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-slate-900 rounded-lg transition-all cursor-pointer"
@@ -1937,7 +1985,11 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
       {isWhatsAppReportOpen && (
         <SmogWhatsAppReportModal
           isOpen={isWhatsAppReportOpen}
-          onClose={() => setIsWhatsAppReportOpen(false)}
+          onClose={() => {
+            setIsWhatsAppReportOpen(false);
+            setWhatsAppReportParams(null);
+            setIsSmogQtyModalOpen(false);
+          }}
           productionDate={(() => {
             try {
               return localStorage.getItem('smog_scanner_production_date') || (whatsAppReportParams?.date || selectedDate || new Date().toISOString().split('T')[0]);

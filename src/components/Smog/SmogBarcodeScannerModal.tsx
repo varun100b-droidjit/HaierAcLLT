@@ -18,7 +18,9 @@ import {
   Sparkles,
   RefreshCw,
   MapPin,
-  Hash
+  Hash,
+  Zap,
+  ZapOff
 } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { findModelByPrefix, getAllModels } from '../../services/modelMasterStore';
@@ -174,6 +176,9 @@ export const SmogBarcodeScannerModal: React.FC<SmogBarcodeScannerModalProps> = (
   const isScanningRef = useRef<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scannerContainerId = 'smog-barcode-reader-viewfinder';
+  const [isTorchOn, setIsTorchOn] = useState<boolean>(false);
+  const [hasTorch, setHasTorch] = useState<boolean>(false);
+  const nativeDetectorIntervalRef = useRef<any>(null);
 
   // Throttling and duplicate prevention
   const lastScannedBarcodeRef = useRef<string>('');
@@ -381,9 +386,31 @@ export const SmogBarcodeScannerModal: React.FC<SmogBarcodeScannerModalProps> = (
     handleBarcodeScannedRef.current = handleBarcodeScanned;
   });
 
+  // Toggle torch / flashlight for scanning in low light conditions
+  const toggleTorch = async () => {
+    try {
+      const videoElem = document.getElementById(scannerContainerId)?.querySelector('video') as HTMLVideoElement | null;
+      const stream = videoElem?.srcObject as MediaStream | null;
+      const track = stream?.getVideoTracks()?.[0];
+      if (track) {
+        const nextState = !isTorchOn;
+        await (track as any).applyConstraints({ advanced: [{ torch: nextState }] });
+        setIsTorchOn(nextState);
+      }
+    } catch (e) {
+      console.warn('Torch toggle error:', e);
+    }
+  };
+
   // Stop Camera Function
   const stopCamera = async () => {
     isStartingRef.current = false;
+    if (nativeDetectorIntervalRef.current) {
+      clearInterval(nativeDetectorIntervalRef.current);
+      nativeDetectorIntervalRef.current = null;
+    }
+    setIsTorchOn(false);
+
     const scanner = html5QrCodeRef.current;
     if (scanner) {
       try {
@@ -429,26 +456,32 @@ export const SmogBarcodeScannerModal: React.FC<SmogBarcodeScannerModalProps> = (
         return;
       }
 
-      // 3. Supported barcode formats (both 1D industrial and 2D)
+      // 3. Supported barcode formats (comprehensive 1D industrial and 2D formats)
       const formats = [
         Html5QrcodeSupportedFormats.CODE_128,
         Html5QrcodeSupportedFormats.CODE_39,
+        Html5QrcodeSupportedFormats.CODE_93,
         Html5QrcodeSupportedFormats.QR_CODE,
         Html5QrcodeSupportedFormats.EAN_13,
         Html5QrcodeSupportedFormats.EAN_8,
         Html5QrcodeSupportedFormats.UPC_A,
         Html5QrcodeSupportedFormats.UPC_E,
-        Html5QrcodeSupportedFormats.DATA_MATRIX
+        Html5QrcodeSupportedFormats.DATA_MATRIX,
+        Html5QrcodeSupportedFormats.ITF,
+        Html5QrcodeSupportedFormats.CODABAR,
+        Html5QrcodeSupportedFormats.AZTEC
       ];
 
-      // Wide barcode scan area optimized for horizontal machine serials
+      // Ultra-responsive scan config: 25 fps + wide 96% x 88% area so users never struggle to align
       const qrConfig = {
-        fps: 15,
+        fps: 25,
         qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
-          const w = Math.min(Math.floor(viewfinderWidth * 0.88), 360);
-          const h = Math.min(Math.floor(viewfinderHeight * 0.65), 180);
-          return { width: Math.max(w, 200), height: Math.max(h, 100) };
-        }
+          const w = Math.min(Math.floor(viewfinderWidth * 0.96), 500);
+          const h = Math.min(Math.floor(viewfinderHeight * 0.88), 320);
+          return { width: Math.max(w, 220), height: Math.max(h, 120) };
+        },
+        aspectRatio: 1.777778,
+        disableFlip: false
       };
 
       // 4. Enumerate cameras
@@ -517,6 +550,56 @@ export const SmogBarcodeScannerModal: React.FC<SmogBarcodeScannerModalProps> = (
           if (typeof config === 'string') {
             setActiveCameraId(config);
           }
+
+          // A. Apply continuous auto-focus & detect torch capability
+          try {
+            const videoElem = container.querySelector('video') as HTMLVideoElement | null;
+            const stream = videoElem?.srcObject as MediaStream | null;
+            const track = stream?.getVideoTracks()?.[0];
+            if (track) {
+              const caps = (track as any).getCapabilities?.();
+              if (caps) {
+                if ('torch' in caps) {
+                  setHasTorch(true);
+                }
+                if ('focusMode' in caps && caps.focusMode.includes('continuous')) {
+                  await (track as any).applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+                }
+              }
+            }
+          } catch {}
+
+          // B. High-speed Hardware Accelerated Native BarcodeDetector (instant sub-50ms scans on Android Chrome)
+          if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+            try {
+              const detector = new (window as any).BarcodeDetector({
+                formats: ['code_128', 'code_39', 'code_93', 'qr_code', 'data_matrix', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'itf', 'aztec']
+              });
+
+              if (nativeDetectorIntervalRef.current) {
+                clearInterval(nativeDetectorIntervalRef.current);
+              }
+
+              nativeDetectorIntervalRef.current = setInterval(async () => {
+                if (!isScanningRef.current) return;
+                const video = document.getElementById(scannerContainerId)?.querySelector('video');
+                if (video && video.readyState >= 2 && !video.paused) {
+                  try {
+                    const barcodes = await detector.detect(video);
+                    if (barcodes && barcodes.length > 0) {
+                      const raw = barcodes[0].rawValue;
+                      if (raw && handleBarcodeScannedRef.current) {
+                        handleBarcodeScannedRef.current(raw);
+                      }
+                    }
+                  } catch {}
+                }
+              }, 70);
+            } catch (detectorErr) {
+              console.warn('Native BarcodeDetector notice:', detectorErr);
+            }
+          }
+
           break;
         } catch (attemptErr) {
           lastErr = attemptErr;
@@ -794,6 +877,22 @@ export const SmogBarcodeScannerModal: React.FC<SmogBarcodeScannerModalProps> = (
               </span>
 
               <div className="flex items-center gap-1.5">
+                {isCameraActive && (
+                  <button
+                    type="button"
+                    onClick={toggleTorch}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border flex items-center gap-1 cursor-pointer transition-all ${
+                      isTorchOn
+                        ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-md shadow-amber-400/40'
+                        : 'bg-slate-900 hover:bg-slate-800 text-amber-300 border-slate-800'
+                    }`}
+                    title={isTorchOn ? 'Turn Flashlight OFF' : 'Turn Flashlight ON'}
+                  >
+                    {isTorchOn ? <Zap className="w-3.5 h-3.5 fill-current" /> : <ZapOff className="w-3.5 h-3.5" />}
+                    <span>{isTorchOn ? 'Light ON' : 'Flashlight'}</span>
+                  </button>
+                )}
+
                 {isCameraActive && availableCameras.length > 1 && (
                   <button
                     type="button"

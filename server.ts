@@ -270,24 +270,26 @@ If no shift change, unit action, or UI command is requested, set those action fi
       // Clean base64 string
       const cleanBase64 = imageBase64.replace(/^data:[^;]+;base64,/, '').trim();
 
-      const prompt = `You are an expert OCR vision specialist analyzing an industrial/manufacturing spreadsheet or filter screen.
+      const prompt = `You are an expert OCR vision specialist analyzing an industrial/manufacturing spreadsheet, label, screen, or paperwork.
 Examine this image carefully.
-Look at the list of models and their associated quantities (e.g. inside parentheses like "(900)" or in adjoining text/columns).
+Look for any model names, machine series codes, and their associated quantities (e.g. production qty, planned qty, numbers in parentheses like "(900)" or in columns like Qty / Count).
 
-STRICT FILTERING REQUIREMENT:
-- Extract ONLY the models whose model name starts with "HSO" (case-insensitive, e.g. "HSO17-3NB-I:AC", "HSO18-3NB-I:AC", "HSO19-5NB-I:AC", "HSO52-3NB-I:AC", "HSO52-5NB-I:AC", etc.).
-- Completely IGNORE all other models such as those starting with "HSI" (e.g. HSI17N, HSI18CP, HSI19GHD, HSI52VP) or "HTO" or "(All)". ONLY EXTRACT MODELS STARTING WITH "HSO".
-- For each matching HSO model, parse:
-  1. "modelName": Exact model string starting with HSO (e.g. "HSO17-3NB-I:AC").
-  2. "qty": The numerical quantity (integer) associated with that model, such as the number in parentheses (e.g., if it says "(900)", qty is 900; "(460)" -> 460).
+CRITICAL INSTRUCTIONS:
+1. Identify all models and their production quantities listed in the image.
+   - If outdoor smog models starting with or containing "HSO" are present (e.g. "HSO17-3NB-I:AC", "HSO18-3NB-I:AC", "HSO19-5NB-I:AC", "HSO52-3NB-I:AC", "HSO52-5NB-I:AC"), extract them with highest priority.
+   - If other model codes are listed with quantities (e.g., "HS18", "18-3NB", "HSO17", etc.), extract them as well.
+2. For each model:
+   - "modelName": Clean, exact model name string (e.g. "HSO17-3NB-I:AC" or "HSO18-3NB-I:AC").
+   - "qty": The positive integer quantity (e.g. 900, 460, 150).
+3. Ignore header rows or summaries like "Total", "Grand Total", "(All)".
 
 OUTPUT FORMAT:
-Return ONLY a valid JSON array of objects:
+Return ONLY a valid JSON array of objects, strictly in this format:
 [
   { "modelName": "HSO17-3NB-I:AC", "qty": 900 },
   { "modelName": "HSO18-3NB-I:AC", "qty": 460 }
 ]
-No backticks, no markdown, just clean raw JSON array.`;
+No backticks, no markdown formatting, just pure JSON array.`;
 
       const imagePart = {
         inlineData: {
@@ -299,7 +301,7 @@ No backticks, no markdown, just clean raw JSON array.`;
         text: prompt
       };
 
-      const modelsToTry = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+      const modelsToTry = ['gemini-3.8-flash', 'gemini-flash-latest'];
       let extractedData: Array<{ modelName: string; qty: number; prQty: number }> = [];
       let lastError: string | null = null;
 
@@ -319,7 +321,6 @@ No backticks, no markdown, just clean raw JSON array.`;
       };
 
       for (const model of modelsToTry) {
-        // Try up to 2 attempts per model with a small delay on transient 503
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
             const response = await ai.models.generateContent({
@@ -338,18 +339,45 @@ No backticks, no markdown, just clean raw JSON array.`;
                 cleaned = cleaned.replace(/^```/g, '').replace(/```$/g, '').trim();
               }
 
-              const parsed = JSON.parse(cleaned);
-              if (Array.isArray(parsed)) {
-                extractedData = parsed
-                  .filter(item => item && typeof item.modelName === 'string' && item.modelName.trim().toUpperCase().startsWith('HSO'))
+              let parsed: any[] = [];
+              try {
+                parsed = JSON.parse(cleaned);
+              } catch {
+                // Fallback: extract JSON array via regex
+                const match = cleaned.match(/\[[\s\S]*\]/);
+                if (match) {
+                  try {
+                    parsed = JSON.parse(match[0]);
+                  } catch {}
+                }
+              }
+
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                // If any models containing HSO exist, prioritize them
+                const hsoList = parsed.filter(item => 
+                  item && typeof item.modelName === 'string' && /HSO/i.test(item.modelName)
+                );
+                
+                const chosenList = hsoList.length > 0 
+                  ? hsoList 
+                  : parsed.filter(item => 
+                      item && typeof item.modelName === 'string' && 
+                      !/^(total|grand total|all|summary)$/i.test(item.modelName.trim()) &&
+                      item.modelName.trim().length > 1
+                    );
+
+                extractedData = chosenList
                   .map(item => {
+                    const cleanName = String(item.modelName || '').trim().toUpperCase();
                     const q = Math.max(1, parseInt(String(item.prQty ?? item.qty), 10) || 0);
                     return {
-                      modelName: item.modelName.trim().toUpperCase(),
+                      modelName: cleanName,
                       qty: q,
                       prQty: q
                     };
-                  });
+                  })
+                  .filter(item => item.modelName.length > 1 && item.qty > 0);
+
                 if (extractedData.length > 0) {
                   break;
                 }
@@ -359,9 +387,8 @@ No backticks, no markdown, just clean raw JSON array.`;
             const errMsg = err?.message || String(err);
             console.warn(`[Smog OCR] Model ${model} attempt ${attempt + 1} note:`, errMsg);
             lastError = errMsg;
-            // If it's a 503 high-demand spike, wait 700ms before retry or next model
             if (errMsg.includes('503') || errMsg.includes('high demand') || errMsg.includes('UNAVAILABLE')) {
-              await new Promise(r => setTimeout(r, 700));
+              await new Promise(r => setTimeout(r, 600));
             }
           }
         }

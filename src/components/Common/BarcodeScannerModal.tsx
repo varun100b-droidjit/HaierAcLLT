@@ -19,7 +19,9 @@ import {
   Upload,
   SwitchCamera,
   Image as ImageIcon,
-  User
+  User,
+  Zap,
+  ZapOff
 } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { findModelByPrefix, getAllModels } from '../../services/modelMasterStore';
@@ -85,6 +87,9 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const isScanningRef = useRef<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scannerContainerId = 'llt-barcode-reader-viewfinder';
+  const [isTorchOn, setIsTorchOn] = useState<boolean>(false);
+  const [hasTorch, setHasTorch] = useState<boolean>(false);
+  const nativeDetectorIntervalRef = useRef<any>(null);
 
   // Anti-freeze scan throttle & duplicate prevention refs
   const handleBarcodeScannedRef = useRef<(rawBarcode: string) => void>(() => {});
@@ -355,6 +360,22 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     handleBarcodeScannedRef.current = handleBarcodeScanned;
   });
 
+  // Toggle torch / flashlight for scanning in low light conditions
+  const toggleTorch = async () => {
+    try {
+      const videoElem = document.getElementById(scannerContainerId)?.querySelector('video') as HTMLVideoElement | null;
+      const stream = videoElem?.srcObject as MediaStream | null;
+      const track = stream?.getVideoTracks()?.[0];
+      if (track) {
+        const nextState = !isTorchOn;
+        await (track as any).applyConstraints({ advanced: [{ torch: nextState }] });
+        setIsTorchOn(nextState);
+      }
+    } catch (e) {
+      console.warn('Torch toggle error:', e);
+    }
+  };
+
   // Start Camera Function with multi-tier fallback for mobile browsers
   const startCamera = async (targetCameraId?: string) => {
     if (isStartingRef.current) return;
@@ -400,14 +421,16 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         Html5QrcodeSupportedFormats.AZTEC
       ];
 
-      // Wide barcode scan area optimized for horizontal machine serials
+      // Ultra-responsive scan config: 25 fps + wide 96% x 88% area so users never struggle to align
       const qrConfig = {
-        fps: 15,
+        fps: 25,
         qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
-          const w = Math.min(Math.floor(viewfinderWidth * 0.90), 380);
-          const h = Math.min(Math.floor(viewfinderHeight * 0.70), 200);
-          return { width: Math.max(w, 200), height: Math.max(h, 90) };
-        }
+          const w = Math.min(Math.floor(viewfinderWidth * 0.96), 500);
+          const h = Math.min(Math.floor(viewfinderHeight * 0.88), 320);
+          return { width: Math.max(w, 220), height: Math.max(h, 120) };
+        },
+        aspectRatio: 1.777778,
+        disableFlip: false
       };
 
       // Detect available cameras on the device
@@ -475,6 +498,56 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
           if (typeof config === 'string') {
             setActiveCameraId(config);
           }
+
+          // A. Apply continuous auto-focus & detect torch capability
+          try {
+            const videoElem = container.querySelector('video') as HTMLVideoElement | null;
+            const stream = videoElem?.srcObject as MediaStream | null;
+            const track = stream?.getVideoTracks()?.[0];
+            if (track) {
+              const caps = (track as any).getCapabilities?.();
+              if (caps) {
+                if ('torch' in caps) {
+                  setHasTorch(true);
+                }
+                if ('focusMode' in caps && caps.focusMode.includes('continuous')) {
+                  await (track as any).applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+                }
+              }
+            }
+          } catch {}
+
+          // B. High-speed Hardware Accelerated Native BarcodeDetector (instant sub-50ms scans on Android Chrome)
+          if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+            try {
+              const detector = new (window as any).BarcodeDetector({
+                formats: ['code_128', 'code_39', 'code_93', 'qr_code', 'data_matrix', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'itf', 'aztec']
+              });
+
+              if (nativeDetectorIntervalRef.current) {
+                clearInterval(nativeDetectorIntervalRef.current);
+              }
+
+              nativeDetectorIntervalRef.current = setInterval(async () => {
+                if (!isScanningRef.current) return;
+                const video = document.getElementById(scannerContainerId)?.querySelector('video');
+                if (video && video.readyState >= 2 && !video.paused) {
+                  try {
+                    const barcodes = await detector.detect(video);
+                    if (barcodes && barcodes.length > 0) {
+                      const raw = barcodes[0].rawValue;
+                      if (raw && handleBarcodeScannedRef.current) {
+                        handleBarcodeScannedRef.current(raw);
+                      }
+                    }
+                  } catch {}
+                }
+              }, 70);
+            } catch (detectorErr) {
+              console.warn('Native BarcodeDetector notice:', detectorErr);
+            }
+          }
+
           break;
         } catch (err) {
           lastErr = err;
@@ -520,6 +593,12 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   // Stop Camera Function
   const stopCamera = async () => {
     isStartingRef.current = false;
+    if (nativeDetectorIntervalRef.current) {
+      clearInterval(nativeDetectorIntervalRef.current);
+      nativeDetectorIntervalRef.current = null;
+    }
+    setIsTorchOn(false);
+
     const scanner = html5QrCodeRef.current;
     if (scanner) {
       try {
@@ -1017,6 +1096,22 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
               </div>
 
               <div className="flex items-center gap-1.5">
+                {isCameraActive && (
+                  <button
+                    type="button"
+                    onClick={toggleTorch}
+                    className={`px-2 py-0.5 rounded-lg text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer border ${
+                      isTorchOn
+                        ? 'bg-amber-400 text-slate-950 border-amber-300 shadow-sm shadow-amber-400/40'
+                        : 'bg-slate-800 hover:bg-slate-700 text-amber-300 border-slate-700'
+                    }`}
+                    title={isTorchOn ? 'Turn Flashlight OFF' : 'Turn Flashlight ON'}
+                  >
+                    {isTorchOn ? <Zap className="w-3 h-3 fill-current" /> : <ZapOff className="w-3 h-3" />}
+                    <span>{isTorchOn ? 'Light ON' : 'Flashlight'}</span>
+                  </button>
+                )}
+
                 {availableCameras.length > 1 && (
                   <button
                     type="button"
