@@ -518,6 +518,8 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
 
   // Compress and optimize camera/gallery photos before sending to Gemini API
   // Prevents 413 Payload Too Large and speeds up extraction from 20s to <1s
+  // Compress and optimize camera/gallery photos before sending to Gemini API
+  // High-res 2200px retains sharp text for small 4th row text while keeping file size small (~200KB)
   const compressImageForOcr = async (file: File): Promise<{ base64: string; mimeType: string }> => {
     return new Promise((resolve) => {
       const reader = new FileReader();
@@ -531,7 +533,7 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
         };
         img.onload = () => {
           try {
-            const MAX_DIM = 1600;
+            const MAX_DIM = 2200;
             let width = img.width;
             let height = img.height;
             if (width > MAX_DIM || height > MAX_DIM) {
@@ -553,7 +555,7 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
             ctx.fillStyle = '#ffffff';
             ctx.fillRect(0, 0, width, height);
             ctx.drawImage(img, 0, 0, width, height);
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
             resolve({ base64: dataUrl, mimeType: 'image/jpeg' });
           } catch {
             resolve({ base64: reader.result as string, mimeType: file.type || 'image/jpeg' });
@@ -565,56 +567,45 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
     });
   };
 
-  // Parse model names and quantities from OCR raw text (Strictly ONLY models starting with "HSO")
-  const parseModelsFromOcrText = (rawText: string): Array<{ modelName: string; qty: number; prQty: number }> => {
-    const lines = rawText.split('\n');
-    const aggregatedMap = new Map<string, number>();
-
-    for (const line of lines) {
-      let cleanLine = line.trim();
-      if (!cleanLine) continue;
-      // Strip leading list index like "1.", "1)", "[1]"
-      cleanLine = cleanLine.replace(/^\s*\[?\d+\]?[\.\)\-\:\s]+\s*/, '');
-      
-      // Strict regex matching ONLY models starting with HSO or HS0 (where 0 is OCR typo for O)
-      const modelMatch = cleanLine.match(/\b(HS[O0][A-Z0-9_\-:]+)/i);
-
-      if (modelMatch) {
-        // Normalize HS0 -> HSO and strip trailing punctuation
-        let modelName = modelMatch[1].toUpperCase().replace(/^HS0/i, 'HSO').replace(/[:\-_\.\,\s]+$/, '');
-        
-        // Strict guard: MUST start with HSO
-        if (modelName.startsWith('HSO') && modelName.length >= 4) {
-          // Look for quantity in parentheses e.g. "(900)"
-          const parenMatch = cleanLine.match(/\((\d{1,6})\)/);
-          let qty = 0;
-          if (parenMatch) {
-            qty = parseInt(parenMatch[1], 10);
-          } else {
-            // Look for number following the model name
-            const idx = cleanLine.indexOf(modelMatch[0]) + modelMatch[0].length;
-            const afterModel = cleanLine.slice(idx);
-            const numMatch = afterModel.match(/\b(\d{1,6})\b/);
-            if (numMatch) {
-              qty = parseInt(numMatch[1], 10);
-            }
-          }
-          if (qty <= 0) qty = 1;
-          const current = aggregatedMap.get(modelName) || 0;
-          aggregatedMap.set(modelName, current + qty);
-        }
-      }
-    }
-
-    return Array.from(aggregatedMap.entries()).map(([modelName, qty]) => ({
-      modelName,
-      qty,
-      prQty: qty
-    }));
+  // Extract clean HSO model name without prefix numbers (e.g. "1. HSO...", "Row 4: HS0...")
+  const cleanAndExtractModelName = (raw: string): string | null => {
+    if (!raw || typeof raw !== 'string') return null;
+    let str = raw.trim();
+    const match = str.match(/HS[O0][A-Za-z0-9_\-:\.\s]*/i);
+    if (!match) return null;
+    let clean = match[0].trim();
+    clean = clean.replace(/^HS0/i, 'HSO');
+    clean = clean.replace(/^HSO\s+/i, 'HSO');
+    clean = clean.replace(/[:\-_\.\,\s]+$/, '');
+    const upper = clean.toUpperCase();
+    return (upper.startsWith('HSO') && upper.length >= 4) ? upper : null;
   };
 
-  // Handle Photo Capture / File Selection & AI OCR Extraction
-  // "Pr. Qty photo se lega"
+  // Extract clean integer quantity (handles "(450)", "1,200", etc.)
+  const parseQuantity = (raw: any): number => {
+    if (typeof raw === 'number' && !isNaN(raw) && raw > 0) return Math.round(raw);
+    if (!raw) return 1;
+    const str = String(raw).trim();
+    const digits = str.replace(/,/g, '').match(/\d+/);
+    if (digits) {
+      const val = parseInt(digits[0], 10);
+      if (!isNaN(val) && val > 0) return val;
+    }
+    return 1;
+  };
+
+  // Safety watchdog: ensure analysis process never stays stuck
+  useEffect(() => {
+    if (isScanning) {
+      const timer = setTimeout(() => {
+        setIsScanning(false);
+        setError('Scanning took longer than expected. Please try again or add models with "+ Add Model".');
+      }, 15000);
+      return () => clearTimeout(timer);
+    }
+  }, [isScanning]);
+
+  // Handle Photo Capture / File Selection & Fast AI OCR Extraction
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -629,7 +620,7 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
     setIsScanning(true);
 
     try {
-      // 1. Compress image to max 1600px JPEG to avoid payload limits and speed up OCR
+      // 1. Compress image to max 2200px JPEG to maintain crispness for all rows
       const { base64: base64Data, mimeType } = await compressImageForOcr(file);
       if (!base64Data) {
         throw new Error('Could not read image file. Please try again.');
@@ -639,9 +630,12 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
       if (cameraInputRef.current) cameraInputRef.current.value = '';
       if (fileInputRef.current) fileInputRef.current.value = '';
 
-      // 3. Attempt Server OCR Endpoint with safe JSON check (never crash on HTML/404)
+      // 3. Fast Server OCR Endpoint with 12s AbortController timeout (prevents hanging)
       let extractedItems: Array<{ modelName: string; qty: number; prQty?: number }> = [];
       let serverErrorMsg: string | null = null;
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
 
       try {
         const response = await fetch('/api/smog/extract-hso-models', {
@@ -652,8 +646,10 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
           body: JSON.stringify({
             imageBase64: base64Data,
             mimeType
-          })
+          }),
+          signal: controller.signal
         });
+        clearTimeout(timeoutId);
 
         const contentType = response.headers.get('content-type') || '';
         if (response.ok && contentType.includes('application/json')) {
@@ -664,53 +660,34 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
             serverErrorMsg = data.note || data.error;
           }
         } else {
-          console.warn(`Server OCR endpoint returned HTTP ${response.status} (${contentType}). Using in-browser OCR fallback.`);
+          serverErrorMsg = 'Server could not process image. Please try again.';
         }
-      } catch (netErr) {
-        console.warn('Server OCR fetch notice:', netErr);
-      }
-
-      // 4. In-Browser OCR Fallback (Runs seamlessly on Vercel, static hosts, or when server API is unavailable)
-      if (extractedItems.length === 0) {
-        try {
-          const { createWorker } = await import('tesseract.js');
-          const worker = await createWorker('eng');
-          const ocrResult = await worker.recognize(base64Data);
-          await worker.terminate();
-
-          const ocrText = ocrResult?.data?.text || '';
-          const localParsed = parseModelsFromOcrText(ocrText);
-          if (localParsed.length > 0) {
-            extractedItems = localParsed;
-          }
-        } catch (tessErr) {
-          console.warn('In-browser Tesseract OCR notice:', tessErr);
+      } catch (netErr: any) {
+        clearTimeout(timeoutId);
+        if (netErr?.name === 'AbortError') {
+          serverErrorMsg = 'AI scanning timed out. Kripya dobara clear photo lein ya "+ Add Model" se enter karein.';
+        } else {
+          console.warn('Server OCR fetch notice:', netErr);
         }
       }
 
-      // 5. Strict Normalization & Aggregation: ONLY models starting with "HSO"
-      const aggregatedMap = new Map<string, number>();
-      for (const it of extractedItems) {
-        if (!it || typeof it.modelName !== 'string') continue;
-        // Normalize HS0 (digit 0) to HSO (letter O)
-        let cleanName = it.modelName.trim().toUpperCase().replace(/^HS0/i, 'HSO').replace(/[:\-_\.\,\s]+$/, '');
-        // Strict requirement: MUST start with HSO
-        if (cleanName.startsWith('HSO') && cleanName.length >= 4) {
-          const q = Math.max(1, parseInt(String(it.prQty ?? it.qty), 10) || 0);
-          const current = aggregatedMap.get(cleanName) || 0;
-          aggregatedMap.set(cleanName, current + q);
-        }
+      // 4. Populate ALL extracted HSO models (preserves all 4 rows, no dropping or unwanted squashing)
+      const formatted: LocalHsoModel[] = [];
+      for (let i = 0; i < extractedItems.length; i++) {
+        const it = extractedItems[i];
+        if (!it) continue;
+        const cleanName = cleanAndExtractModelName(it.modelName) || it.modelName?.trim().toUpperCase();
+        if (!cleanName || !cleanName.startsWith('HSO')) continue;
+        const qty = parseQuantity(it.prQty ?? it.qty);
+        formatted.push({
+          id: `hso-${Date.now()}-${i}`,
+          modelName: cleanName,
+          prQty: qty,
+          smogQty: 0,
+          pendingQty: qty
+        });
       }
 
-      const formatted: LocalHsoModel[] = Array.from(aggregatedMap.entries()).map(([modelName, qty], idx) => ({
-        id: `hso-${Date.now()}-${idx}`,
-        modelName,
-        prQty: qty,
-        smogQty: 0,
-        pendingQty: qty
-      }));
-
-      // 6. Populate models or display clean friendly notification
       if (formatted.length > 0) {
         setHsoModels(formatted);
         const scannedTotalPr = formatted.reduce((s, m) => s + m.prQty, 0);
@@ -1253,11 +1230,16 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
 
               {/* Scanning Active State */}
               {isScanning && (
-                <div className="p-2.5 rounded-xl bg-slate-950 border border-cyan-500/50 flex items-center gap-2.5 animate-pulse">
-                  <Loader2 className="w-4 h-4 text-cyan-400 animate-spin shrink-0" />
-                  <span className="text-xs text-cyan-200 font-mono font-bold">
-                    Analyzing photo with Gemini AI... Extracting Models & Pr. Qty, photo deleted immediately.
-                  </span>
+                <div className="p-3 rounded-xl bg-slate-950 border border-cyan-500/60 flex items-center gap-3 animate-pulse shadow-lg shadow-cyan-950/40">
+                  <Loader2 className="w-5 h-5 text-cyan-400 animate-spin shrink-0" />
+                  <div className="flex flex-col">
+                    <span className="text-xs text-cyan-200 font-bold tracking-wide">
+                      AI Vision Analyzing Photo (~2-3 sec)...
+                    </span>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      Scanning all HSO Models &amp; Pr. Qty from photo. Photo deleted immediately.
+                    </span>
+                  </div>
                 </div>
               )}
 
