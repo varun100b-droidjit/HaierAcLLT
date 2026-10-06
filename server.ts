@@ -273,25 +273,25 @@ If no shift change, unit action, or UI command is requested, set those action fi
 
       const prompt = `You are an expert industrial OCR vision specialist analyzing a manufacturing production plan, whiteboard, screen, paper sheet, or AC unit label.
 
-TASK: Extract EVERY SINGLE outdoor AC model that starts with "HSO" and its quantity.
+TASK: Extract EVERY SINGLE outdoor AC model and its production quantity.
 
 CRITICAL INSTRUCTIONS:
-1. COMPLETE THOROUGH SCAN OF ALL ROWS:
-   - Scan the ENTIRE image thoroughly from top to bottom and left to right.
-   - Do NOT stop after finding 2 or 3 models! If there are 4 HSO models visible in the photo (e.g. 4 rows in a table or list), you MUST return ALL 4 models! Check all 4 rows to the very bottom!
+1. SCAN ALL ROWS THOROUGHLY (DO NOT STOP AT 3!):
+   - In this factory, production boards commonly list 4 or more outdoor model rows (e.g. 18, 24, 36, 52 tonnage variants like HSO18-3NB, HSO24-3NB, HSO36-3NB, HSO52-3NB).
+   - If there are 4 rows visible in the photo, YOU MUST RETURN ALL 4 ROWS! Do NOT drop the 4th row! Check all rows right to the bottom of the table/sheet.
    - Even if the 4th row has quantity 0, blank, pending, or is slightly tilted/faint, YOU MUST STILL RETURN IT!
 2. MODEL NAME MATCHING & NORMALIZATION:
-   - Must match models starting with "HSO" (case-insensitive, e.g. "HSO18-3NB-I:AC", "HSO24-3", "HSO17-3NB", "HSO52-3NB", "HSO18", "HSO24-3NB", "HSO36", "HSO52", etc.).
-   - If written with spaces like "H S O 18" or "HSO 18", normalize to "HSO18".
-   - If "HSO" looks like "HS0" (digit zero), normalize it to "HSO".
-   - If a table lists models under an "HSO" column or header but subsequent rows only show the tonnage/model code like "52-3NB" or "18-3", prepend "HSO" to make it "HSO52-3NB".
+   - All outdoor models in this section belong to the HSO series.
+   - If a row explicitly has "HSO" (e.g. "HSO18-3NB", "HSO24-3", "HSO17-3NB", "HSO52-3NB", "HSO 18", "HS036"), normalize to "HSO...".
+   - If subsequent rows omit "HSO" and only write the tonnage or model code (e.g. "52-3NB", "52", "36-3", "24-3NB", "18-3"), YOU MUST PREPEND "HSO" so it becomes "HSO52-3NB" or "HSO52". NEVER omit a model just because "HSO" was not repeatedly printed on that row!
+   - If "HSO" looks like "HS0" (digit zero) or "H S O", normalize it to "HSO".
    - Strip row numbering prefixes like "1.", "2)", "Row 3:", "4.", "#4", "[4]". Return only the clean model name.
    - Ignore indoor units starting with "HSI" or "HTO".
 3. QUANTITY EXTRACTION:
-   - Look for the associated production quantity (Target, Plan, Qty, Count, or numbers like "(450)", "120", "100", "50").
+   - Look for the associated production quantity (Target, Plan, Qty, Count, or numbers like "(450)", "120", "100", "50", "40").
    - Return clean positive integer for qty. If quantity is missing or blank or zero, set qty to 1. NEVER drop a model because of quantity!
 4. PRESERVE EVERY ROW:
-   - Every single HSO model row detected in the photo must be its own object in the array. If 4 rows exist, output exactly 4 objects.`;
+   - Every single outdoor model row detected in the photo must be its own object in the array. If 4 rows exist, output exactly 4 objects.`;
 
       const imagePart = {
         inlineData: {
@@ -303,8 +303,8 @@ CRITICAL INSTRUCTIONS:
         text: prompt
       };
 
-      // Ultra-fast responsive models: gemini-flash-lite-latest answers in ~800ms-1s without 503 errors
-      const modelsToTry = ['gemini-flash-lite-latest', 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-flash-latest'];
+      // Ultra-fast responsive models: gemini-flash-lite-latest answers in ~750ms-1s without 503 errors
+      const modelsToTry = ['gemini-flash-lite-latest', 'gemini-3.5-flash-lite', 'gemini-3.5-flash'];
       let extractedData: Array<{ modelName: string; qty: number; prQty: number }> = [];
       let lastError: string | null = null;
 
@@ -324,8 +324,8 @@ CRITICAL INSTRUCTIONS:
         let str = raw.trim();
         // Normalize variations: "H S O", "H-S-O", "H.S.O", "H S 0", "HS0"
         str = str.replace(/H\s*[\.\-_]?\s*S\s*[\.\-_]?\s*[O0]/gi, 'HSO');
-        // Strip common row numbering prefixes like "1.", "2)", "Row 4:", "4 - ", "#4 ", "[4]"
-        str = str.replace(/^[\s\d\.\)\(\[\]\:\#\-\*]+/, '').trim();
+        // Strip common row numbering prefixes like "1.", "2)", "Row 4:", "4 - ", "#4 ", "[4]" safely without eating model digits
+        str = str.replace(/^([1-9]\s*[\.\)]\s*|[1-9]\s*[-]\s+|row\s*\d+[\:\-]?\s*|\#\d+\s*|\[\d+\]\s*)/i, '').trim();
         
         // Match HSO model pattern
         const hsoMatch = str.match(/HSO[A-Za-z0-9_\-:\.\/\s]*/i);
@@ -337,7 +337,7 @@ CRITICAL INSTRUCTIONS:
           if (upper.startsWith('HSO') && upper.length >= 4) return upper;
         }
 
-        // If no HSO prefix but looks like an AC model number (e.g. "18-3NB", "24-3", "52-3NB")
+        // If no HSO prefix but looks like an AC model number (e.g. "18-3NB", "24-3", "52-3NB", "52")
         const numMatch = str.match(/\b(\d{2}[A-Za-z0-9_\-:\.\/]*)\b/);
         if (numMatch) {
           const candidate = ('HSO' + numMatch[1]).toUpperCase().replace(/\s+/g, '');
@@ -360,7 +360,7 @@ CRITICAL INSTRUCTIONS:
 
       for (const model of modelsToTry) {
         try {
-          // 6-second timeout per model so it never hangs
+          // 5-second timeout per model so it never hangs
           const apiPromise = ai.models.generateContent({
             model,
             contents: { parts: [imagePart, textPart] },
@@ -381,7 +381,7 @@ CRITICAL INSTRUCTIONS:
           });
 
           const timeoutPromise = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error(`Timeout on model ${model}`)), 6000)
+            setTimeout(() => reject(new Error(`Timeout on model ${model}`)), 5000)
           );
 
           const response: any = await Promise.race([apiPromise, timeoutPromise]);

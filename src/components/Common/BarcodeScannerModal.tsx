@@ -96,6 +96,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const lastScannedBarcodeRef = useRef<string>('');
   const lastScanTimeRef = useRef<number>(0);
   const isProcessingScanRef = useRef<boolean>(false);
+  const manualSerialInputRef = useRef<HTMLInputElement | null>(null);
   const [scanFeedbackToast, setScanFeedbackToast] = useState<{ serial: string; model: string; isError?: boolean } | null>(null);
   const toastTimeoutRef = useRef<any>(null);
 
@@ -202,10 +203,20 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   };
 
   // Add scanned machine to list (matching Smog Scanner pattern)
-  const addScannedMachine = (rawSerial: string, explicitModel?: string) => {
-    if (!rawSerial) return;
+  const addScannedMachine = (rawSerial: string, explicitModel?: string): MachineEntryRow | null => {
+    if (!rawSerial || !rawSerial.trim()) {
+      setBatchError('⚠️ Please enter or scan a Series Number first (e.g. A010834A0001).');
+      playRejectBeep();
+      manualSerialInputRef.current?.focus();
+      return null;
+    }
     const cleanSerial = sanitizeBarcode(rawSerial);
-    if (!cleanSerial) return;
+    if (!cleanSerial) {
+      setBatchError('⚠️ Please enter a valid Series Number.');
+      playRejectBeep();
+      manualSerialInputRef.current?.focus();
+      return null;
+    }
 
     // RULE: Barcode MUST start with 'A'
     if (!cleanSerial.startsWith('A')) {
@@ -220,7 +231,8 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
       toastTimeoutRef.current = setTimeout(() => {
         setScanFeedbackToast(null);
       }, 3000);
-      return;
+      manualSerialInputRef.current?.focus();
+      return null;
     }
 
     const currentProcess = selectedProcessRef.current;
@@ -277,7 +289,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         isError: true
       });
       toastTimeoutRef.current = setTimeout(() => setScanFeedbackToast(null), 2500);
-      return;
+      return null;
     }
 
     playScanBeep();
@@ -308,6 +320,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     toastTimeoutRef.current = setTimeout(() => {
       setScanFeedbackToast(null);
     }, 2500);
+    return newItem;
   };
 
   // Process Barcode Scanned (from camera, photo or gun)
@@ -421,28 +434,30 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         Html5QrcodeSupportedFormats.AZTEC
       ];
 
-      // Ultra-responsive scan config: 25 fps + wide 96% x 88% area so users never struggle to align
+      // Ultra-responsive scan config: flexible aspect ratio for mobile portrait without OverconstrainedError
       const qrConfig = {
         fps: 25,
         qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
-          const w = Math.min(Math.floor(viewfinderWidth * 0.96), 500);
-          const h = Math.min(Math.floor(viewfinderHeight * 0.88), 320);
-          return { width: Math.max(w, 220), height: Math.max(h, 120) };
+          const w = Math.min(Math.floor(viewfinderWidth * 0.94), 500);
+          const h = Math.min(Math.floor(viewfinderHeight * 0.85), 300);
+          return { width: Math.max(w, 200), height: Math.max(h, 100) };
         },
-        aspectRatio: 1.777778,
         disableFlip: false
       };
 
-      // Detect available cameras on the device
+      // Detect available cameras on the device safely
       let cameraList: { id: string; label: string }[] = [];
       try {
-        const devices = await Html5Qrcode.getCameras();
-        if (devices && devices.length > 0) {
-          cameraList = devices.map((d, i) => ({
-            id: d.id,
-            label: d.label || `Camera ${i + 1}`
-          }));
-          setAvailableCameras(cameraList);
+        if (typeof navigator !== 'undefined' && navigator.mediaDevices?.enumerateDevices) {
+          const devs = await navigator.mediaDevices.enumerateDevices();
+          const videoDevs = devs.filter(d => d.kind === 'videoinput');
+          if (videoDevs.length > 0) {
+            cameraList = videoDevs.map((d, i) => ({
+              id: d.deviceId,
+              label: d.label || `Camera ${i + 1}`
+            }));
+            setAvailableCameras(cameraList);
+          }
         }
       } catch (camErr) {
         console.warn('Camera enumeration note:', camErr);
@@ -763,9 +778,28 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const handleSendELT = async () => {
     setBatchError(null);
 
-    const filledRows = machineRows.filter(r => r.serialNumber.trim().length > 0);
+    // 1. Auto-add pending manual series input if user typed or scanned into box without clicking Add
+    let currentRows = [...machineRows];
+    if (manualSerialInput && manualSerialInput.trim().length > 0) {
+      const added = addScannedMachine(manualSerialInput, manualModelInput);
+      if (added) {
+        currentRows = [added, ...machineRows.filter(r => sanitizeBarcode(r.serialNumber) !== added.serialNumber)];
+      }
+    }
+
+    const filledRows = currentRows.filter(r => r.serialNumber.trim().length > 0);
     if (filledRows.length === 0) {
-      setBatchError('Please scan or enter at least one machine Series No.');
+      setBatchError('⚠️ Kripya pehle barcode scan karein ya Series Number daalkar Add karein.');
+      playRejectBeep();
+      manualSerialInputRef.current?.focus();
+      return;
+    }
+
+    // Check for row error in current batch
+    const errorRow = filledRows.find(r => r.error);
+    if (errorRow) {
+      setBatchError(`⚠️ Machine "${errorRow.serialNumber}": ${errorRow.error}`);
+      playRejectBeep();
       return;
     }
 
@@ -773,6 +807,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     const nonA = filledRows.find(r => !r.serialNumber.trim().toUpperCase().startsWith('A'));
     if (nonA) {
       setBatchError(`Machine "${nonA.serialNumber}": Only barcodes starting with 'A' are accepted.`);
+      playRejectBeep();
       return;
     }
 
@@ -780,6 +815,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     const invalidModel = filledRows.find(r => r.matchStatus !== 'matched' || !r.modelName);
     if (invalidModel) {
       setBatchError(`Machine "${invalidModel.serialNumber}": Valid Model Name required from Model Sheet.`);
+      playRejectBeep();
       return;
     }
 
@@ -788,6 +824,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     const duplicatesInBatch = serials.filter((item, index) => serials.indexOf(item) !== index);
     if (duplicatesInBatch.length > 0) {
       setBatchError(`Duplicate Serial Number in current list: ${duplicatesInBatch[0]}`);
+      playRejectBeep();
       return;
     }
 
@@ -795,6 +832,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     const alreadyInELT = filledRows.find(r => findInELTRecords(r.serialNumber.trim().toUpperCase()));
     if (alreadyInELT) {
       setBatchError(`Serial Number ${alreadyInELT.serialNumber} is already registered in ELT Record.`);
+      playRejectBeep();
       return;
     }
 
@@ -838,9 +876,28 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const handleReturnBSR = async () => {
     setBatchError(null);
 
-    const filledRows = machineRows.filter(r => r.serialNumber.trim().length > 0);
+    // 1. Auto-add pending manual series input if user typed or scanned into box without clicking Add
+    let currentRows = [...machineRows];
+    if (manualSerialInput && manualSerialInput.trim().length > 0) {
+      const added = addScannedMachine(manualSerialInput, manualModelInput);
+      if (added) {
+        currentRows = [added, ...machineRows.filter(r => sanitizeBarcode(r.serialNumber) !== added.serialNumber)];
+      }
+    }
+
+    const filledRows = currentRows.filter(r => r.serialNumber.trim().length > 0);
     if (filledRows.length === 0) {
-      setBatchError('Please scan or enter at least one machine Series No. to return.');
+      setBatchError('⚠️ Kripya return karne ke liye pehle barcode scan karein ya Series Number daalkar Add karein.');
+      playRejectBeep();
+      manualSerialInputRef.current?.focus();
+      return;
+    }
+
+    // Check for row error in current batch
+    const errorRow = filledRows.find(r => r.error);
+    if (errorRow) {
+      setBatchError(`⚠️ Machine "${errorRow.serialNumber}": ${errorRow.error}`);
+      playRejectBeep();
       return;
     }
 
@@ -848,6 +905,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     const nonA = filledRows.find(r => !r.serialNumber.trim().toUpperCase().startsWith('A'));
     if (nonA) {
       setBatchError(`Machine "${nonA.serialNumber}": Only barcodes starting with 'A' are accepted.`);
+      playRejectBeep();
       return;
     }
 
@@ -855,6 +913,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     const invalidRows = filledRows.filter(r => r.matchStatus !== 'matched' || !findInELTRecords(r.serialNumber.trim().toUpperCase()));
     if (invalidRows.length > 0) {
       setBatchError(`Machine "${invalidRows[0].serialNumber}" not found in ELT Record. Cannot return.`);
+      playRejectBeep();
       return;
     }
 
@@ -1187,6 +1246,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                 </label>
                 <div className="relative">
                   <input
+                    ref={manualSerialInputRef}
                     type="text"
                     value={manualSerialInput}
                     onChange={(e) => {
@@ -1395,9 +1455,13 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
           {selectedProcess === 'SEND_ELT' ? (
             <button
               type="button"
-              disabled={isSubmittingELT || machineRows.filter(r => r.serialNumber.trim().length > 0 && !r.error).length === 0}
+              disabled={isSubmittingELT}
               onClick={handleSendELT}
-              className="flex-1 sm:flex-initial px-6 py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-cyan-950/80 disabled:opacity-50 disabled:cursor-not-allowed transition-all cursor-pointer active:scale-95"
+              className={`flex-1 sm:flex-initial px-6 py-2.5 rounded-xl font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg transition-all cursor-pointer active:scale-95 ${
+                machineRows.filter(r => r.serialNumber.trim().length > 0 && !r.error).length > 0 || manualSerialInput.trim().length > 0
+                  ? 'bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white shadow-cyan-950/80 cursor-pointer'
+                  : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700 cursor-pointer'
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               {isSubmittingELT ? (
                 <>
@@ -1416,9 +1480,13 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
           ) : (
             <button
               type="button"
-              disabled={isSubmittingBSR || machineRows.filter(r => r.serialNumber.trim().length > 0 && r.matchStatus === 'matched' && !r.error).length === 0}
+              disabled={isSubmittingBSR}
               onClick={handleReturnBSR}
-              className="flex-1 sm:flex-initial px-6 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/80 disabled:opacity-50 disabled:cursor-not-allowed transition-all cursor-pointer active:scale-95"
+              className={`flex-1 sm:flex-initial px-6 py-2.5 rounded-xl font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg transition-all cursor-pointer active:scale-95 ${
+                machineRows.filter(r => r.serialNumber.trim().length > 0 && r.matchStatus === 'matched' && !r.error).length > 0 || manualSerialInput.trim().length > 0
+                  ? 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-950/80 cursor-pointer'
+                  : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700 cursor-pointer'
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
             >
               {isSubmittingBSR ? (
                 <>
