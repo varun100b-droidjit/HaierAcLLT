@@ -276,29 +276,22 @@ If no shift change, unit action, or UI command is requested, set those action fi
 TASK: Extract EVERY SINGLE outdoor AC model that starts with "HSO" and its quantity.
 
 CRITICAL INSTRUCTIONS:
-1. COMPLETE THOROUGH SCAN: Scan the ENTIRE image thoroughly from top to bottom and left to right. Do NOT stop after finding 2 or 3 models. If there are 4 HSO models visible in the photo, you MUST return all 4 models. Check all rows, columns, headers, tables, handwritten notes, and lists.
-2. MODEL NAME MATCHING:
-   - Must match models starting with "HSO" (case-insensitive, e.g. "HSO18-3NB-I:AC", "HSO24-3", "HSO17-3NB", "HSO52-3NB", "HSO18", "HSO24-3NB", etc.).
+1. COMPLETE THOROUGH SCAN OF ALL ROWS:
+   - Scan the ENTIRE image thoroughly from top to bottom and left to right.
+   - Do NOT stop after finding 2 or 3 models! If there are 4 HSO models visible in the photo (e.g. 4 rows in a table or list), you MUST return ALL 4 models! Check all 4 rows to the very bottom!
+   - Even if the 4th row has quantity 0, blank, pending, or is slightly tilted/faint, YOU MUST STILL RETURN IT!
+2. MODEL NAME MATCHING & NORMALIZATION:
+   - Must match models starting with "HSO" (case-insensitive, e.g. "HSO18-3NB-I:AC", "HSO24-3", "HSO17-3NB", "HSO52-3NB", "HSO18", "HSO24-3NB", "HSO36", "HSO52", etc.).
+   - If written with spaces like "H S O 18" or "HSO 18", normalize to "HSO18".
    - If "HSO" looks like "HS0" (digit zero), normalize it to "HSO".
-   - If written with spaces like "HSO 18", normalize to "HSO18".
-   - Strip row numbering prefixes like "1.", "2)", "Row 3:", "#4", "[4]". Return only the clean model name.
-   - Ignore indoor units or models starting with "HSI" or "HTO".
+   - If a table lists models under an "HSO" column or header but subsequent rows only show the tonnage/model code like "52-3NB" or "18-3", prepend "HSO" to make it "HSO52-3NB".
+   - Strip row numbering prefixes like "1.", "2)", "Row 3:", "4.", "#4", "[4]". Return only the clean model name.
+   - Ignore indoor units starting with "HSI" or "HTO".
 3. QUANTITY EXTRACTION:
-   - Look for the associated production quantity (often in columns like Qty, Target, Count, Planned, or in parentheses like "(450)" or numbers following the model).
-   - Return clean positive integer for qty. (e.g., "(450)" -> 450, "1,200" -> 1200).
-   - If quantity is missing, zero, or unreadable, set qty to 1. NEVER skip a model because its quantity is unclear!
+   - Look for the associated production quantity (Target, Plan, Qty, Count, or numbers like "(450)", "120", "100", "50").
+   - Return clean positive integer for qty. If quantity is missing or blank or zero, set qty to 1. NEVER drop a model because of quantity!
 4. PRESERVE EVERY ROW:
-   - Do NOT omit or merge distinct rows. Each listed HSO model in the photo must be its own object in the array.
-
-OUTPUT FORMAT:
-Return ONLY a valid JSON array of objects:
-[
-  { "modelName": "HSO18-3NB-I:AC", "qty": 450 },
-  { "modelName": "HSO24-3", "qty": 120 },
-  { "modelName": "HSO17-3NB", "qty": 100 },
-  { "modelName": "HSO52-3NB", "qty": 50 }
-]
-Pure JSON array only.`;
+   - Every single HSO model row detected in the photo must be its own object in the array. If 4 rows exist, output exactly 4 objects.`;
 
       const imagePart = {
         inlineData: {
@@ -310,16 +303,15 @@ Pure JSON array only.`;
         text: prompt
       };
 
-      // gemini-3.1-flash-lite is ultra-fast (~2-3s) with 99.9% uptime and zero 503 high-demand errors
-      const modelsToTry = ['gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+      // Ultra-fast responsive models: gemini-flash-lite-latest answers in ~800ms-1s without 503 errors
+      const modelsToTry = ['gemini-flash-lite-latest', 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-flash-latest'];
       let extractedData: Array<{ modelName: string; qty: number; prQty: number }> = [];
       let lastError: string | null = null;
 
-      // Clean/sanitize error message to avoid exposing raw JSON/tracebacks to client
       const formatFriendlyErrorMessage = (raw: string | null): string => {
         if (!raw) return 'Photo me se "HSO" models extract nahi ho sake. Kripya HSO models wali photo lein ya "+ Add Model" se manually enter karein.';
         if (raw.includes('503') || raw.includes('high demand') || raw.includes('UNAVAILABLE')) {
-          return 'AI service temporarily busy hai. Kripya 2-3 second baad dobara photo click karein ya "+ Add Model" se enter karein.';
+          return 'AI service temporarily busy hai. Kripya dobara photo click karein ya "+ Add Model" se enter karein.';
         }
         if (raw.includes('429') || raw.includes('RESOURCE_EXHAUSTED')) {
           return 'AI request limit reached. Kripya thoda wait karke dobara koshish karein.';
@@ -330,15 +322,28 @@ Pure JSON array only.`;
       const cleanAndExtractModelName = (raw: string): string | null => {
         if (!raw || typeof raw !== 'string') return null;
         let str = raw.trim();
-        // Extract from HSO or HS0 onward (strips prefixes like "1. ", "Row 4: ", "[4] ", "#4 - ")
-        const match = str.match(/HS[O0][A-Za-z0-9_\-:\.\s]*/i);
-        if (!match) return null;
-        let clean = match[0].trim();
-        clean = clean.replace(/^HS0/i, 'HSO');
-        clean = clean.replace(/^HSO\s+/i, 'HSO');
-        clean = clean.replace(/[:\-_\.\,\s]+$/, '');
-        const upper = clean.toUpperCase();
-        return (upper.startsWith('HSO') && upper.length >= 4) ? upper : null;
+        // Normalize variations: "H S O", "H-S-O", "H.S.O", "H S 0", "HS0"
+        str = str.replace(/H\s*[\.\-_]?\s*S\s*[\.\-_]?\s*[O0]/gi, 'HSO');
+        // Strip common row numbering prefixes like "1.", "2)", "Row 4:", "4 - ", "#4 ", "[4]"
+        str = str.replace(/^[\s\d\.\)\(\[\]\:\#\-\*]+/, '').trim();
+        
+        // Match HSO model pattern
+        const hsoMatch = str.match(/HSO[A-Za-z0-9_\-:\.\/\s]*/i);
+        if (hsoMatch) {
+          let clean = hsoMatch[0].trim();
+          clean = clean.replace(/^HSO[\s\-_:]+/i, 'HSO');
+          clean = clean.replace(/[:\-_\.\,\s\/]+$/, '');
+          const upper = clean.toUpperCase().replace(/\s+/g, '');
+          if (upper.startsWith('HSO') && upper.length >= 4) return upper;
+        }
+
+        // If no HSO prefix but looks like an AC model number (e.g. "18-3NB", "24-3", "52-3NB")
+        const numMatch = str.match(/\b(\d{2}[A-Za-z0-9_\-:\.\/]*)\b/);
+        if (numMatch) {
+          const candidate = ('HSO' + numMatch[1]).toUpperCase().replace(/\s+/g, '');
+          if (candidate.length >= 5) return candidate;
+        }
+        return null;
       };
 
       const parseQuantity = (raw: any): number => {
@@ -355,13 +360,31 @@ Pure JSON array only.`;
 
       for (const model of modelsToTry) {
         try {
-          const response = await ai.models.generateContent({
+          // 6-second timeout per model so it never hangs
+          const apiPromise = ai.models.generateContent({
             model,
             contents: { parts: [imagePart, textPart] },
             config: {
-              responseMimeType: 'application/json'
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    modelName: { type: 'string' },
+                    qty: { type: 'integer' }
+                  },
+                  required: ['modelName', 'qty']
+                }
+              }
             }
           });
+
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`Timeout on model ${model}`)), 6000)
+          );
+
+          const response: any = await Promise.race([apiPromise, timeoutPromise]);
 
           if (response && response.text) {
             let cleaned = response.text.trim();
@@ -371,7 +394,7 @@ Pure JSON array only.`;
               cleaned = cleaned.replace(/^```/g, '').replace(/```$/g, '').trim();
             }
 
-            let parsed: any[] = [];
+            let parsed: any = null;
             try {
               parsed = JSON.parse(cleaned);
             } catch {
@@ -383,10 +406,24 @@ Pure JSON array only.`;
               }
             }
 
-            if (Array.isArray(parsed) && parsed.length > 0) {
+            // Normalize parsed to an array of items
+            let candidateList: any[] = [];
+            if (Array.isArray(parsed)) {
+              candidateList = parsed;
+            } else if (parsed && typeof parsed === 'object') {
+              if (Array.isArray(parsed.models)) candidateList = parsed.models;
+              else if (Array.isArray(parsed.items)) candidateList = parsed.items;
+              else if (Array.isArray(parsed.data)) candidateList = parsed.data;
+              else {
+                // Key-value dictionary e.g. { "HSO18": 100, "HSO24": 200 }
+                candidateList = Object.entries(parsed).map(([k, v]) => ({ modelName: k, qty: v }));
+              }
+            }
+
+            if (candidateList.length > 0) {
               const items: Array<{ modelName: string; qty: number; prQty: number }> = [];
 
-              for (const item of parsed) {
+              for (const item of candidateList) {
                 if (!item) continue;
                 const rawName = item.modelName || item.model || item.name || item.code || '';
                 const cleanName = cleanAndExtractModelName(String(rawName));

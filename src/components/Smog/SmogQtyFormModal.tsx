@@ -189,10 +189,14 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
 
     const finalNotes = overrideNotes !== undefined ? overrideNotes : notes;
 
-    // Cache active date and shift so refresh lands on the exact same date and shift
+    // Cache active date, shift and models so refresh instantly displays the exact models
     try {
       localStorage.setItem('smog_scanner_production_date', date);
       localStorage.setItem('smog_active_shift', normShift);
+      if (currentModels.length > 0) {
+        localStorage.setItem(`smog_preview_models_${date}_${normShift}`, JSON.stringify(currentModels));
+        localStorage.setItem('smog_last_preview_models', JSON.stringify(currentModels));
+      }
     } catch {}
 
     const saved = saveSmogQtyRecord({
@@ -206,11 +210,11 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
       isClosed: isClosedState
     });
 
-    // Explicitly await sync to Firebase Firestore so data is guaranteed stored in Firebase
+    // Explicitly sync to Firebase Firestore & Server Backup
     try {
       await syncSmogQtyToFirestore(saved);
     } catch (e) {
-      console.warn('Direct sync to Firebase note:', e);
+      console.warn('Sync note:', e);
     }
 
     return saved;
@@ -241,7 +245,7 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
         localStorage.setItem('smog_active_shift', initialShift);
       } catch {}
 
-      // Check if there is already an existing record for this date & shift
+      // 1. Check if there is already an existing record for this date & shift in store
       const allRecords = getSmogQtyRecords();
       const existing = allRecords.find(r => r.date === initialDate && r.shift === initialShift);
       if (existing && existing.models && existing.models.length > 0) {
@@ -265,7 +269,21 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
           setClosedRecord(null);
         }
       } else {
-        // Query Firestore & server database as cloud fallback
+        // 2. Immediate check in cached preview models for this date & shift
+        let localPreviewLoaded = false;
+        try {
+          const cached = localStorage.getItem(`smog_preview_models_${initialDate}_${initialShift}`) || 
+                         localStorage.getItem('smog_last_preview_models');
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setHsoModels(parsed);
+              localPreviewLoaded = true;
+            }
+          }
+        } catch {}
+
+        // 3. Query Firestore & server database as cloud fallback
         fetchSmogQtyRecordByDateAndShift(initialDate, initialShift, true).then((remote) => {
           if (remote && remote.models && remote.models.length > 0) {
             const loaded = (remote.models || []).map((m: any, idx: number) => {
@@ -567,18 +585,32 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
     });
   };
 
-  // Extract clean HSO model name without prefix numbers (e.g. "1. HSO...", "Row 4: HS0...")
+  // Extract clean HSO model name without prefix numbers (e.g. "1. HSO...", "Row 4: HS0...", "4. 52-3NB")
   const cleanAndExtractModelName = (raw: string): string | null => {
     if (!raw || typeof raw !== 'string') return null;
     let str = raw.trim();
-    const match = str.match(/HS[O0][A-Za-z0-9_\-:\.\s]*/i);
-    if (!match) return null;
-    let clean = match[0].trim();
-    clean = clean.replace(/^HS0/i, 'HSO');
-    clean = clean.replace(/^HSO\s+/i, 'HSO');
-    clean = clean.replace(/[:\-_\.\,\s]+$/, '');
-    const upper = clean.toUpperCase();
-    return (upper.startsWith('HSO') && upper.length >= 4) ? upper : null;
+    // Normalize variations: "H S O", "H-S-O", "H.S.O", "H S 0", "HS0"
+    str = str.replace(/H\s*[\.\-_]?\s*S\s*[\.\-_]?\s*[O0]/gi, 'HSO');
+    // Strip common row numbering prefixes like "1.", "2)", "Row 4:", "4 - ", "#4 ", "[4]"
+    str = str.replace(/^[\s\d\.\)\(\[\]\:\#\-\*]+/, '').trim();
+    
+    // Match HSO model pattern
+    const hsoMatch = str.match(/HSO[A-Za-z0-9_\-:\.\/\s]*/i);
+    if (hsoMatch) {
+      let clean = hsoMatch[0].trim();
+      clean = clean.replace(/^HSO[\s\-_:]+/i, 'HSO');
+      clean = clean.replace(/[:\-_\.\,\s\/]+$/, '');
+      const upper = clean.toUpperCase().replace(/\s+/g, '');
+      if (upper.startsWith('HSO') && upper.length >= 4) return upper;
+    }
+
+    // If no HSO prefix but looks like an AC model number (e.g. "18-3NB", "24-3", "52-3NB")
+    const numMatch = str.match(/\b(\d{2}[A-Za-z0-9_\-:\.\/]*)\b/);
+    if (numMatch) {
+      const candidate = ('HSO' + numMatch[1]).toUpperCase().replace(/\s+/g, '');
+      if (candidate.length >= 5) return candidate;
+    }
+    return null;
   };
 
   // Extract clean integer quantity (handles "(450)", "1,200", etc.)
@@ -600,7 +632,7 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
       const timer = setTimeout(() => {
         setIsScanning(false);
         setError('Scanning took longer than expected. Please try again or add models with "+ Add Model".');
-      }, 15000);
+      }, 18000);
       return () => clearTimeout(timer);
     }
   }, [isScanning]);
@@ -630,12 +662,12 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
       if (cameraInputRef.current) cameraInputRef.current.value = '';
       if (fileInputRef.current) fileInputRef.current.value = '';
 
-      // 3. Fast Server OCR Endpoint with 12s AbortController timeout (prevents hanging)
+      // 3. Fast Server OCR Endpoint with 15s AbortController timeout (prevents hanging)
       let extractedItems: Array<{ modelName: string; qty: number; prQty?: number }> = [];
       let serverErrorMsg: string | null = null;
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 12000);
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
 
       try {
         const response = await fetch('/api/smog/extract-hso-models', {
@@ -691,6 +723,13 @@ ${closedRecord.notes ? `\nRemarks: ${closedRecord.notes}` : ''}`.trim();
       if (formatted.length > 0) {
         setHsoModels(formatted);
         const scannedTotalPr = formatted.reduce((s, m) => s + m.prQty, 0);
+
+        // Instantly cache in preview storage so refresh never deletes preview
+        try {
+          const normShift = (shift === 'B') ? 'B' : 'A';
+          localStorage.setItem(`smog_preview_models_${date}_${normShift}`, JSON.stringify(formatted));
+          localStorage.setItem('smog_last_preview_models', JSON.stringify(formatted));
+        } catch {}
 
         // Instantly save to Firebase Firestore, server backup & local storage
         await persistSmogQtyState(formatted, notes, false);

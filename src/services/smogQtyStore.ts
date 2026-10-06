@@ -141,26 +141,45 @@ export async function syncSmogQtyToFirestore(record: SmogQtyRecord): Promise<voi
     updatedAt: new Date().toISOString()
   };
 
-  // 1. Direct Persist to Firebase Firestore
-  if (db) {
+  // Cache models in dedicated local keys for instant retrieval on refresh
+  if (Array.isArray(record.models) && record.models.length > 0) {
     try {
-      const docRef = doc(db, 'smog_qty_records', canonicalId);
-      const cleaned = cleanForFirestore(recordToSave);
-      await setDoc(docRef, cleaned, { merge: true });
-      console.log('[Firebase] Smog Qty record saved to Firestore:', canonicalId);
-    } catch (err) {
-      console.warn('[Firebase] Smog Qty record save note:', err);
-    }
+      localStorage.setItem(`smog_preview_models_${record.date}_${normalizedShift}`, JSON.stringify(record.models));
+      localStorage.setItem('smog_last_preview_models', JSON.stringify(record.models));
+    } catch {}
   }
 
-  // 2. Server-side persistence fallback & backup
-  try {
-    await fetch('/api/smog/sync-qty-record', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(recordToSave)
-    }).catch(() => {});
-  } catch {}
+  // 1. Direct Server-side persistence backup (runs in parallel, commits in ~15ms)
+  const serverSyncPromise = fetch('/api/smog/sync-qty-record', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(recordToSave)
+  }).then(async (res) => {
+    if (res.ok) {
+      console.log('[Server Backup] Smog Qty record saved to server:', canonicalId);
+    }
+  }).catch((err) => {
+    console.warn('[Server Backup] Sync note:', err);
+  });
+
+  // 2. Direct Persist to Firebase Firestore (with 3.5s timeout guarantee so it never blocks)
+  const firestoreSyncPromise = (async () => {
+    if (db) {
+      try {
+        const docRef = doc(db, 'smog_qty_records', canonicalId);
+        const cleaned = cleanForFirestore(recordToSave);
+        await Promise.race([
+          setDoc(docRef, cleaned, { merge: true }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore write timeout')), 3500))
+        ]);
+        console.log('[Firebase] Smog Qty record saved to Firestore:', canonicalId);
+      } catch (err) {
+        console.warn('[Firebase] Smog Qty record save note:', err);
+      }
+    }
+  })();
+
+  await Promise.allSettled([serverSyncPromise, firestoreSyncPromise]);
 }
 
 /**
@@ -187,8 +206,11 @@ export async function fetchSmogQtyRecordByDateAndShift(
   if (db) {
     try {
       const docRef = doc(db, 'smog_qty_records', canonicalId);
-      const snap = await getDoc(docRef);
-      if (snap.exists()) {
+      const snap = await Promise.race([
+        getDoc(docRef),
+        new Promise<any>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 2500))
+      ]);
+      if (snap && snap.exists && snap.exists()) {
         serverDoc = snap.data() as SmogQtyRecord;
       }
     } catch (err) {
@@ -200,8 +222,11 @@ export async function fetchSmogQtyRecordByDateAndShift(
       try {
         const colRef = collection(db, 'smog_qty_records');
         const q = query(colRef, where('date', '==', date), where('shift', '==', normShift));
-        const snap = await getDocs(q);
-        if (!snap.empty) {
+        const snap = await Promise.race([
+          getDocs(q),
+          new Promise<any>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 2500))
+        ]);
+        if (snap && !snap.empty) {
           serverDoc = snap.docs[0].data() as SmogQtyRecord;
         }
       } catch (err) {
@@ -210,17 +235,42 @@ export async function fetchSmogQtyRecordByDateAndShift(
     }
   }
 
-  // 2. Fallback to Server Backup
-  if (!serverDoc) {
-    try {
-      const resp = await fetch('/api/smog/qty-records');
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.success && Array.isArray(data.records)) {
-          const matched = data.records.find((r: any) => r.date === date && r.shift === normShift);
-          if (matched) {
+  // 2. Query Server Backup (always check server backup to ensure models aren't missed)
+  try {
+    const resp = await fetch('/api/smog/qty-records');
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.success && Array.isArray(data.records)) {
+        const matched = data.records.find((r: any) => r.date === date && r.shift === normShift);
+        if (matched) {
+          if (!serverDoc || (!serverDoc.models?.length && matched.models?.length)) {
             serverDoc = matched;
+          } else if (serverDoc && matched.models && matched.models.length >= (serverDoc.models?.length || 0)) {
+            serverDoc = { ...serverDoc, ...matched, models: matched.models };
           }
+        }
+      }
+    }
+  } catch {}
+
+  // 3. Fallback to localStorage cached preview models if remote has no models
+  if ((!serverDoc || !serverDoc.models || serverDoc.models.length === 0) && typeof window !== 'undefined') {
+    try {
+      const cached = localStorage.getItem(`smog_preview_models_${date}_${normShift}`) || localStorage.getItem('smog_last_preview_models');
+      if (cached) {
+        const parsedModels = JSON.parse(cached);
+        if (Array.isArray(parsedModels) && parsedModels.length > 0) {
+          const totalPr = parsedModels.reduce((s: number, m: any) => s + (Number(m.prQty ?? m.qty) || 0), 0);
+          serverDoc = {
+            id: canonicalId,
+            date,
+            shift: normShift,
+            smogQty: serverDoc?.smogQty || 0,
+            prQty: totalPr,
+            pendingQty: Math.max(0, totalPr - (serverDoc?.smogQty || 0)),
+            models: parsedModels,
+            createdAt: new Date().toISOString()
+          };
         }
       }
     } catch {}
@@ -240,7 +290,7 @@ export async function fetchSmogQtyRecordByDateAndShift(
 }
 
 /**
- * Queries Firestore for all Smog Qty records for a specific date (both Shift A and B).
+ * Queries Firestore & Server Backup for all Smog Qty records for a specific date (both Shift A and B).
  */
 export async function fetchSmogQtyRecordsByDate(date: string): Promise<SmogQtyRecord[]> {
   const current = getSmogQtyRecords();
@@ -252,8 +302,11 @@ export async function fetchSmogQtyRecordsByDate(date: string): Promise<SmogQtyRe
     try {
       const colRef = collection(db, 'smog_qty_records');
       const q = query(colRef, where('date', '==', date));
-      const snap = await getDocs(q);
-      if (!snap.empty) {
+      const snap = await Promise.race([
+        getDocs(q),
+        new Promise<any>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 2500))
+      ]);
+      if (snap && !snap.empty) {
         snap.forEach((d: any) => {
           const data = d.data() as SmogQtyRecord;
           if (data && data.date) {
@@ -266,18 +319,19 @@ export async function fetchSmogQtyRecordsByDate(date: string): Promise<SmogQtyRe
     }
   }
 
-  // Try server backup if empty
-  if (remoteRecords.length === 0) {
-    try {
-      const resp = await fetch('/api/smog/qty-records');
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.success && Array.isArray(data.records)) {
-          remoteRecords = data.records.filter((r: any) => r.date === date);
+  // Always merge with server backup records for this date
+  try {
+    const resp = await fetch('/api/smog/qty-records');
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.success && Array.isArray(data.records)) {
+        const dateRecords = data.records.filter((r: any) => r.date === date);
+        if (dateRecords.length > 0) {
+          remoteRecords = mergeSmogRecords(remoteRecords, dateRecords);
         }
       }
-    } catch {}
-  }
+    }
+  } catch {}
 
   if (remoteRecords.length > 0) {
     const merged = mergeSmogRecords(current, remoteRecords);
