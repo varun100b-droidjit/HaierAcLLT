@@ -535,6 +535,327 @@ CRITICAL INSTRUCTIONS:
     }
   });
 
+  // ========================================================
+  // Proto, PP, and Field Units Server-Side Persistence & Live Hours Reduction
+  // ========================================================
+  const protoUnitsBackupFile = path.join(smogQtyBackupDir, 'proto_units.json');
+  const ppUnitsBackupFile = path.join(smogQtyBackupDir, 'pp_units.json');
+  const fieldUnitsBackupFile = path.join(smogQtyBackupDir, 'field_units.json');
+
+  const getUnitsFile = (filePath: string): any[] => {
+    try {
+      if (fs.existsSync(filePath)) {
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      }
+    } catch (e) {
+      console.warn(`Could not read backup file ${filePath}:`, e);
+    }
+    return [];
+  };
+
+  const saveUnitsFile = (filePath: string, list: any[]) => {
+    try {
+      if (!fs.existsSync(smogQtyBackupDir)) {
+        fs.mkdirSync(smogQtyBackupDir, { recursive: true });
+      }
+      fs.writeFileSync(filePath, JSON.stringify(list, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn(`Could not write backup file ${filePath}:`, e);
+    }
+  };
+
+  const formatToYYYYMMDDHHMM = (d: Date): string => {
+    const yr = d.getFullYear();
+    const mo = String(d.getMonth() + 1).padStart(2, '0');
+    const da = String(d.getDate()).padStart(2, '0');
+    const hr = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${yr}-${mo}-${da} ${hr}:${mi}`;
+  };
+
+  const upsertUnitInFile = (filePath: string, unit: any) => {
+    if (!unit || !unit.id) return [];
+    const list = getUnitsFile(filePath);
+    const idx = list.findIndex(u => u.id === unit.id);
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...unit, updatedAt: unit.updatedAt || new Date().toISOString() };
+    } else {
+      list.unshift({ ...unit, createdAt: unit.createdAt || new Date().toISOString() });
+    }
+    saveUnitsFile(filePath, list);
+    return list;
+  };
+
+  // Proto units endpoints
+  app.get('/api/units/proto', (_req, res) => {
+    res.json({ success: true, units: getUnitsFile(protoUnitsBackupFile) });
+  });
+
+  app.post('/api/units/proto/sync', (req, res) => {
+    try {
+      const payload = req.body;
+      if (Array.isArray(payload)) {
+        const list = getUnitsFile(protoUnitsBackupFile);
+        const map = new Map(list.map(u => [u.id, u]));
+        payload.forEach(u => {
+          if (u && u.id) map.set(u.id, { ...map.get(u.id), ...u });
+        });
+        const merged = Array.from(map.values());
+        saveUnitsFile(protoUnitsBackupFile, merged);
+        return res.json({ success: true, count: merged.length });
+      }
+      const updated = upsertUnitInFile(protoUnitsBackupFile, payload);
+      return res.json({ success: true, count: updated.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.delete('/api/units/proto/:id', (req, res) => {
+    try {
+      const list = getUnitsFile(protoUnitsBackupFile).filter(u => u.id !== req.params.id);
+      saveUnitsFile(protoUnitsBackupFile, list);
+      return res.json({ success: true });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // PP units endpoints
+  app.get('/api/units/pp', (_req, res) => {
+    res.json({ success: true, units: getUnitsFile(ppUnitsBackupFile) });
+  });
+
+  app.post('/api/units/pp/sync', (req, res) => {
+    try {
+      const payload = req.body;
+      if (Array.isArray(payload)) {
+        const list = getUnitsFile(ppUnitsBackupFile);
+        const map = new Map(list.map(u => [u.id, u]));
+        payload.forEach(u => {
+          if (u && u.id) map.set(u.id, { ...map.get(u.id), ...u });
+        });
+        const merged = Array.from(map.values());
+        saveUnitsFile(ppUnitsBackupFile, merged);
+        return res.json({ success: true, count: merged.length });
+      }
+      const updated = upsertUnitInFile(ppUnitsBackupFile, payload);
+      return res.json({ success: true, count: updated.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.delete('/api/units/pp/:id', (req, res) => {
+    try {
+      const list = getUnitsFile(ppUnitsBackupFile).filter(u => u.id !== req.params.id);
+      saveUnitsFile(ppUnitsBackupFile, list);
+      return res.json({ success: true });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Field units endpoints
+  app.get('/api/units/field', (_req, res) => {
+    res.json({ success: true, units: getUnitsFile(fieldUnitsBackupFile) });
+  });
+
+  app.post('/api/units/field/sync', (req, res) => {
+    try {
+      const payload = req.body;
+      if (Array.isArray(payload)) {
+        const list = getUnitsFile(fieldUnitsBackupFile);
+        const map = new Map(list.map(u => [u.id, u]));
+        payload.forEach(u => {
+          if (u && u.id) map.set(u.id, { ...map.get(u.id), ...u });
+        });
+        const merged = Array.from(map.values());
+        saveUnitsFile(fieldUnitsBackupFile, merged);
+        return res.json({ success: true, count: merged.length });
+      }
+      const updated = upsertUnitInFile(fieldUnitsBackupFile, payload);
+      return res.json({ success: true, count: updated.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.delete('/api/units/field/:id', (req, res) => {
+    try {
+      const list = getUnitsFile(fieldUnitsBackupFile).filter(u => u.id !== req.params.id);
+      saveUnitsFile(fieldUnitsBackupFile, list);
+      return res.json({ success: true });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Unified Live Unit Hours Reduction Endpoint
+  app.post('/api/units/reduce-live-hours', (req, res) => {
+    try {
+      const { sections = [], hoursToDeduct = 0, clientUnits = {} } = req.body;
+      const deductNum = parseFloat(hoursToDeduct);
+      if (isNaN(deductNum) || deductNum <= 0) {
+        return res.status(400).json({ success: false, error: 'Valid positive hoursToDeduct is required.' });
+      }
+
+      const nowMs = Date.now();
+      let protoAffected = 0;
+      let ppAffected = 0;
+      let fieldAffected = 0;
+
+      let updatedProto: any[] = [];
+      let updatedPp: any[] = [];
+      let updatedField: any[] = [];
+
+      // 1. Proto Units Reduction
+      if (sections.includes('proto')) {
+        let protos = getUnitsFile(protoUnitsBackupFile);
+        if (Array.isArray(clientUnits?.proto) && clientUnits.proto.length > 0) {
+          const map = new Map(protos.map(u => [u.id, u]));
+          clientUnits.proto.forEach((cu: any) => {
+            if (cu && cu.id) map.set(cu.id, { ...(map.get(cu.id) || {}), ...cu });
+          });
+          protos = Array.from(map.values());
+        }
+        for (let i = 0; i < protos.length; i++) {
+          const u = protos[i];
+          if (u && u.status === 'live') {
+            const currentDone = typeof u.doneHour === 'number' ? u.doneHour : (parseFloat(String(u.doneHour || 0)) || 0);
+            if (currentDone >= deductNum) {
+              u.doneHour = Math.max(0, currentDone - deductNum);
+            } else {
+              const rem = deductNum - currentDone;
+              let createdMs = NaN;
+              if (u.createdAt) {
+                createdMs = new Date(u.createdAt.replace(' ', 'T')).getTime();
+                if (isNaN(createdMs)) createdMs = new Date(u.createdAt).getTime();
+              }
+              if (isNaN(createdMs)) createdMs = nowMs;
+              const newCreatedMs = Math.min(nowMs, createdMs + rem * 3600 * 1000);
+              const newCreatedAt = formatToYYYYMMDDHHMM(new Date(newCreatedMs));
+              u.doneHour = 0;
+              u.createdAt = newCreatedAt;
+              if (u.reportDetails) {
+                u.reportDetails.testCommenced = newCreatedAt;
+              }
+            }
+            u.updatedAt = new Date().toISOString();
+            protoAffected++;
+          }
+        }
+        if (protos.length > 0) {
+          saveUnitsFile(protoUnitsBackupFile, protos);
+        }
+        updatedProto = protos;
+      }
+
+      // 2. PP Units Reduction
+      if (sections.includes('pp')) {
+        let pps = getUnitsFile(ppUnitsBackupFile);
+        if (Array.isArray(clientUnits?.pp) && clientUnits.pp.length > 0) {
+          const map = new Map(pps.map(u => [u.id, u]));
+          clientUnits.pp.forEach((cu: any) => {
+            if (cu && cu.id) map.set(cu.id, { ...(map.get(cu.id) || {}), ...cu });
+          });
+          pps = Array.from(map.values());
+        }
+        for (let i = 0; i < pps.length; i++) {
+          const u = pps[i];
+          if (u && u.status === 'live') {
+            const currentDone = typeof u.doneHour === 'number' ? u.doneHour : (parseFloat(String(u.doneHour || 0)) || 0);
+            if (currentDone >= deductNum) {
+              u.doneHour = Math.max(0, currentDone - deductNum);
+            } else {
+              const rem = deductNum - currentDone;
+              let createdMs = NaN;
+              if (u.createdAt) {
+                createdMs = new Date(u.createdAt.replace(' ', 'T')).getTime();
+                if (isNaN(createdMs)) createdMs = new Date(u.createdAt).getTime();
+              }
+              if (isNaN(createdMs)) createdMs = nowMs;
+              const newCreatedMs = Math.min(nowMs, createdMs + rem * 3600 * 1000);
+              const newCreatedAt = formatToYYYYMMDDHHMM(new Date(newCreatedMs));
+              u.doneHour = 0;
+              u.createdAt = newCreatedAt;
+              if (u.reportDetails) {
+                u.reportDetails.testCommenced = newCreatedAt;
+              }
+            }
+            u.updatedAt = new Date().toISOString();
+            ppAffected++;
+          }
+        }
+        if (pps.length > 0) {
+          saveUnitsFile(ppUnitsBackupFile, pps);
+        }
+        updatedPp = pps;
+      }
+
+      // 3. Field Units Reduction
+      if (sections.includes('field')) {
+        let fields = getUnitsFile(fieldUnitsBackupFile);
+        if (Array.isArray(clientUnits?.field) && clientUnits.field.length > 0) {
+          const map = new Map(fields.map(u => [u.id, u]));
+          clientUnits.field.forEach((cu: any) => {
+            if (cu && cu.id) map.set(cu.id, { ...(map.get(cu.id) || {}), ...cu });
+          });
+          fields = Array.from(map.values());
+        }
+        for (let i = 0; i < fields.length; i++) {
+          const u = fields[i];
+          if (u && u.status === 'live') {
+            const currentDone = typeof u.doneHour === 'number' ? u.doneHour : (parseFloat(String(u.doneHour || 0)) || 0);
+            if (currentDone >= deductNum) {
+              u.doneHour = Math.max(0, currentDone - deductNum);
+            } else {
+              const rem = deductNum - currentDone;
+              const startRaw = u.startDateTime || u.createdAt || '';
+              let startMs = NaN;
+              if (startRaw) {
+                startMs = new Date(startRaw.replace(' ', 'T')).getTime();
+                if (isNaN(startMs)) startMs = new Date(startRaw).getTime();
+              }
+              if (isNaN(startMs)) startMs = nowMs;
+              const newStartMs = Math.min(nowMs, startMs + rem * 3600 * 1000);
+              const newStartFormatted = formatToYYYYMMDDHHMM(new Date(newStartMs));
+              u.doneHour = 0;
+              u.startDateTime = newStartFormatted;
+              u.createdAt = newStartFormatted;
+            }
+            u.updatedAt = new Date().toISOString();
+            fieldAffected++;
+          }
+        }
+        if (fields.length > 0) {
+          saveUnitsFile(fieldUnitsBackupFile, fields);
+        }
+        updatedField = fields;
+      }
+
+      const totalAffected = protoAffected + ppAffected + fieldAffected;
+      return res.json({
+        success: true,
+        affectedCount: totalAffected,
+        summary: {
+          proto: protoAffected,
+          pp: ppAffected,
+          field: fieldAffected
+        },
+        deductedHours: deductNum,
+        updatedProto,
+        updatedPp,
+        updatedField
+      });
+    } catch (e: any) {
+      console.error('Error in reduce-live-hours route:', e);
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
   // Health check
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok' });

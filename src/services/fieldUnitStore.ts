@@ -354,6 +354,30 @@ if (db) {
 // Automatically fetch from Firestore / Supabase on init
 initDataSync();
 
+export async function fetchFieldUnitsFromServer(): Promise<FieldUnit[] | null> {
+  try {
+    const res = await fetch('/api/units/field');
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && data.success && Array.isArray(data.units) && data.units.length > 0) {
+      return data.units;
+    }
+  } catch (e) {
+    console.warn('[FieldStore] Server units fetch note:', e);
+  }
+  return null;
+}
+
+export function syncFieldUnitsToServer(units: FieldUnit[]) {
+  try {
+    fetch('/api/units/field/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(units)
+    }).catch(() => {});
+  } catch {}
+}
+
 export async function forceSyncFieldUnits(): Promise<FieldUnit[]> {
   await initDataSync();
   return getFieldUnits();
@@ -361,10 +385,11 @@ export async function forceSyncFieldUnits(): Promise<FieldUnit[]> {
 
 async function initDataSync() {
   try {
-    // Try fetching from Firestore first
-    const firestoreData = await fetchFieldUnitsFromFirestore();
-    if (firestoreData && firestoreData.length > 0) {
-      const clean = firestoreData.filter(u => u && u.id !== 'field-101' && u.id !== 'field-102' && u.id !== 'field-103');
+    // 1. First fetch from local backend server (/api/units/field)
+    // The server is persistent across all browsers & tabs and not blocked by Firestore quota!
+    const serverData = await fetchFieldUnitsFromServer();
+    if (serverData && serverData.length > 0) {
+      const clean = serverData.filter(u => u && u.id !== 'field-101' && u.id !== 'field-102' && u.id !== 'field-103');
       const merged = mergeWithLocalCache(clean);
       fieldUnitsCache = merged;
       safeLocalStorageSet(STORAGE_KEY_FIELD_UNITS, merged);
@@ -374,17 +399,35 @@ async function initDataSync() {
       return;
     }
 
-    // Fallback to Supabase
-    const remoteData = await fetchFieldUnitsFromSupabase();
-    if (remoteData && remoteData.length > 0) {
-      const clean = remoteData.filter(u => u && u.id !== 'field-101' && u.id !== 'field-102' && u.id !== 'field-103');
-      const merged = mergeWithLocalCache(clean);
-      fieldUnitsCache = merged;
-      safeLocalStorageSet(STORAGE_KEY_FIELD_UNITS, merged);
-      idbSaveAll('field_units', merged);
-      notifySubscribers();
-      clean.forEach(u => syncFieldUnitToFirestore(u));
-    }
+    // 2. Fallback to Firestore
+    try {
+      const firestoreData = await fetchFieldUnitsFromFirestore();
+      if (firestoreData && firestoreData.length > 0) {
+        const clean = firestoreData.filter(u => u && u.id !== 'field-101' && u.id !== 'field-102' && u.id !== 'field-103');
+        const merged = mergeWithLocalCache(clean);
+        fieldUnitsCache = merged;
+        safeLocalStorageSet(STORAGE_KEY_FIELD_UNITS, merged);
+        idbSaveAll('field_units', merged);
+        notifySubscribers();
+        syncFieldUnitsToServer(merged);
+        pushPendingLocalUnitsToFirestore();
+        return;
+      }
+    } catch {}
+
+    // 3. Fallback to Supabase
+    try {
+      const remoteData = await fetchFieldUnitsFromSupabase();
+      if (remoteData && remoteData.length > 0) {
+        const cleanRemote = remoteData.filter(u => u && u.id !== 'field-101' && u.id !== 'field-102' && u.id !== 'field-103');
+        const merged = mergeWithLocalCache(cleanRemote);
+        fieldUnitsCache = merged;
+        safeLocalStorageSet(STORAGE_KEY_FIELD_UNITS, merged);
+        idbSaveAll('field_units', merged);
+        notifySubscribers();
+        syncFieldUnitsToServer(merged);
+      }
+    } catch {}
   } catch (e) {
     console.warn('Field units Cloud sync note:', e);
   }
@@ -429,6 +472,8 @@ function saveLocalFieldUnits(units: FieldUnit[]) {
   idbSaveAll('field_units', clean);
   // Persist clean copy to localStorage
   safeLocalStorageSet(STORAGE_KEY_FIELD_UNITS, clean);
+  // Persist to server backend immediately
+  syncFieldUnitsToServer(clean);
   if (localFieldBus) {
     try { localFieldBus.postMessage({ timestamp: Date.now() }); } catch {}
   }

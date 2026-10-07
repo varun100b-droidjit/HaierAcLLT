@@ -357,6 +357,30 @@ if (db) {
 // Automatically fetch from Firestore / Supabase on init
 initDataSync();
 
+export async function fetchPpUnitsFromServer(): Promise<PpUnit[] | null> {
+  try {
+    const res = await fetch('/api/units/pp');
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && data.success && Array.isArray(data.units) && data.units.length > 0) {
+      return data.units;
+    }
+  } catch (e) {
+    console.warn('[PpStore] Server units fetch note:', e);
+  }
+  return null;
+}
+
+export function syncPpUnitsToServer(units: PpUnit[]) {
+  try {
+    fetch('/api/units/pp/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(units)
+    }).catch(() => {});
+  } catch {}
+}
+
 export async function forceSyncPpUnits(): Promise<PpUnit[]> {
   await initDataSync();
   return getPpUnits();
@@ -364,10 +388,11 @@ export async function forceSyncPpUnits(): Promise<PpUnit[]> {
 
 async function initDataSync() {
   try {
-    // Try fetching from Firestore first
-    const firestoreData = await fetchPpUnitsFromFirestore();
-    if (firestoreData && firestoreData.length > 0) {
-      const clean = firestoreData.filter(u => u && !u.id.startsWith('pp-idu-') && !u.id.startsWith('pp-odu-'));
+    // 1. First fetch from local backend server (/api/units/pp)
+    // The server is persistent across all browsers & tabs and not blocked by Firestore quota!
+    const serverData = await fetchPpUnitsFromServer();
+    if (serverData && serverData.length > 0) {
+      const clean = serverData.filter(u => u && !u.id.startsWith('pp-idu-') && !u.id.startsWith('pp-odu-'));
       const merged = mergeWithLocalCache(clean);
       ppUnitsCache = merged;
       safeLocalStorageSet(STORAGE_KEY_PP_UNITS, merged);
@@ -377,17 +402,35 @@ async function initDataSync() {
       return;
     }
 
-    // Fallback to Supabase
-    const remoteData = await fetchPpUnitsFromSupabase();
-    if (remoteData && remoteData.length > 0) {
-      const cleanRemote = remoteData.filter(u => u && !u.id.startsWith('pp-idu-') && !u.id.startsWith('pp-odu-'));
-      const merged = mergeWithLocalCache(cleanRemote);
-      ppUnitsCache = merged;
-      safeLocalStorageSet(STORAGE_KEY_PP_UNITS, merged);
-      idbSaveAll('pp_units', merged);
-      notifyListeners();
-      cleanRemote.forEach(u => syncPpUnitToFirestore(u));
-    }
+    // 2. Fallback to Firestore
+    try {
+      const firestoreData = await fetchPpUnitsFromFirestore();
+      if (firestoreData && firestoreData.length > 0) {
+        const clean = firestoreData.filter(u => u && !u.id.startsWith('pp-idu-') && !u.id.startsWith('pp-odu-'));
+        const merged = mergeWithLocalCache(clean);
+        ppUnitsCache = merged;
+        safeLocalStorageSet(STORAGE_KEY_PP_UNITS, merged);
+        idbSaveAll('pp_units', merged);
+        notifyListeners();
+        syncPpUnitsToServer(merged);
+        pushPendingLocalUnitsToFirestore();
+        return;
+      }
+    } catch {}
+
+    // 3. Fallback to Supabase
+    try {
+      const remoteData = await fetchPpUnitsFromSupabase();
+      if (remoteData && remoteData.length > 0) {
+        const cleanRemote = remoteData.filter(u => u && !u.id.startsWith('pp-idu-') && !u.id.startsWith('pp-odu-'));
+        const merged = mergeWithLocalCache(cleanRemote);
+        ppUnitsCache = merged;
+        safeLocalStorageSet(STORAGE_KEY_PP_UNITS, merged);
+        idbSaveAll('pp_units', merged);
+        notifyListeners();
+        syncPpUnitsToServer(merged);
+      }
+    } catch {}
   } catch (e) {
     console.warn('Data sync note in PP Store:', e);
   }
@@ -411,6 +454,8 @@ function saveLocalPpUnits(data: PpUnit[]) {
   idbSaveAll('pp_units', clean);
   // Persist clean copy to localStorage
   safeLocalStorageSet(STORAGE_KEY_PP_UNITS, clean);
+  // Persist to server backend immediately
+  syncPpUnitsToServer(clean);
   if (localPpBus) {
     try { localPpBus.postMessage({ timestamp: Date.now() }); } catch {}
   }

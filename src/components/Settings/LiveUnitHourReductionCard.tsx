@@ -16,9 +16,25 @@ import {
   ChevronUp,
   ArrowRight
 } from 'lucide-react';
-import { getProtoUnits, updateProtoUnit } from '../../services/protoUnitStore';
-import { getPpUnits, updatePpUnit } from '../../services/ppUnitStore';
-import { getFieldUnits, updateFieldUnit } from '../../services/fieldUnitStore';
+import { 
+  getProtoUnits, 
+  setProtoUnitsDirectly, 
+  syncProtoUnitToFirestore, 
+  fetchProtoUnitsFromServer 
+} from '../../services/protoUnitStore';
+import { 
+  getPpUnits, 
+  setPpUnitsDirectly, 
+  syncPpUnitToFirestore, 
+  fetchPpUnitsFromServer 
+} from '../../services/ppUnitStore';
+import { 
+  getFieldUnits, 
+  setFieldUnitsDirectly, 
+  syncFieldUnitToFirestore, 
+  fetchFieldUnitsFromServer 
+} from '../../services/fieldUnitStore';
+import { broadcastLabRealtimeEvent } from '../../lib/supabase';
 import { ProtoUnit, PpUnit, FieldUnit } from '../../types';
 import { audioAlarm } from '../../utils/audioAlarm';
 import { addLabNotification } from '../../services/unitStore';
@@ -59,17 +75,32 @@ export const LiveUnitHourReductionCard: React.FC = () => {
   } | null>(null);
 
   // Refresh live units from stores
-  const refreshLiveUnits = () => {
+  const refreshLiveUnits = async () => {
     try {
-      const allProto = getProtoUnits();
+      let allProto = getProtoUnits();
+      let allPp = getPpUnits();
+      let allField = getFieldUnits();
+
+      // If local cache is empty, fetch from server backbone
+      if (allProto.length === 0) {
+        const s = await fetchProtoUnitsFromServer();
+        if (s && s.length > 0) allProto = s;
+      }
+      if (allPp.length === 0) {
+        const s = await fetchPpUnitsFromServer();
+        if (s && s.length > 0) allPp = s;
+      }
+      if (allField.length === 0) {
+        const s = await fetchFieldUnitsFromServer();
+        if (s && s.length > 0) allField = s;
+      }
+
       const liveProto = allProto.filter(u => u.status === 'live');
       setProtoLiveUnits(liveProto);
 
-      const allPp = getPpUnits();
       const livePp = allPp.filter(u => u.status === 'live');
       setPpLiveUnits(livePp);
 
-      const allField = getFieldUnits();
       const liveField = allField.filter(u => u.status === 'live');
       setFieldLiveUnits(liveField);
     } catch (err) {
@@ -79,7 +110,7 @@ export const LiveUnitHourReductionCard: React.FC = () => {
 
   useEffect(() => {
     refreshLiveUnits();
-    const interval = setInterval(refreshLiveUnits, 4000);
+    const interval = setInterval(refreshLiveUnits, 3000);
     return () => clearInterval(interval);
   }, []);
 
@@ -128,126 +159,90 @@ export const LiveUnitHourReductionCard: React.FC = () => {
     setConfirmModalOpen(false);
 
     try {
-      let affectedProtoCount = 0;
-      let affectedPpCount = 0;
-      let affectedFieldCount = 0;
-      const nowMs = Date.now();
+      const selectedSections: string[] = [];
+      if (isProtoSelected) selectedSections.push('proto');
+      if (isPpSelected) selectedSections.push('pp');
+      if (isFieldSelected) selectedSections.push('field');
 
-      // 1. DEDUCT FROM PROTO LIVE UNITS
-      if (isProtoSelected && protoLiveUnits.length > 0) {
-        for (const unit of protoLiveUnits) {
-          const currentDone = typeof unit.doneHour === 'number' ? unit.doneHour : (parseFloat(String(unit.doneHour || 0)) || 0);
-
-          if (currentDone >= deductNum) {
-            // Can be subtracted directly from doneHour
-            const newDone = Math.max(0, currentDone - deductNum);
-            updateProtoUnit(unit.id, { doneHour: newDone });
-          } else {
-            // doneHour is less than deductNum, consume doneHour and shift createdAt forward
-            const remainingToDeduct = deductNum - currentDone;
-            let createdMs = NaN;
-            if (unit.createdAt) {
-              createdMs = new Date(unit.createdAt.replace(' ', 'T')).getTime();
-              if (isNaN(createdMs)) createdMs = new Date(unit.createdAt).getTime();
-            }
-            if (isNaN(createdMs)) createdMs = nowMs;
-
-            const newCreatedMs = Math.min(nowMs, createdMs + remainingToDeduct * 3600 * 1000);
-            const newCreatedAt = formatToYYYYMMDDHHMM(new Date(newCreatedMs));
-
-            updateProtoUnit(unit.id, {
-              doneHour: 0,
-              createdAt: newCreatedAt
-            });
+      // 1. Post to Server Endpoint for persistent cross-browser storage
+      const res = await fetch('/api/units/reduce-live-hours', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sections: selectedSections,
+          hoursToDeduct: deductNum,
+          clientUnits: {
+            proto: isProtoSelected ? getProtoUnits() : undefined,
+            pp: isPpSelected ? getPpUnits() : undefined,
+            field: isFieldSelected ? getFieldUnits() : undefined
           }
-          affectedProtoCount++;
-        }
+        })
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `Server responded with status ${res.status}`);
       }
 
-      // 2. DEDUCT FROM PP LIVE UNITS
-      if (isPpSelected && ppLiveUnits.length > 0) {
-        for (const unit of ppLiveUnits) {
-          const currentDone = typeof unit.doneHour === 'number' ? unit.doneHour : (parseFloat(String(unit.doneHour || 0)) || 0);
+      const result = await res.json();
 
-          if (currentDone >= deductNum) {
-            const newDone = Math.max(0, currentDone - deductNum);
-            updatePpUnit(unit.id, { doneHour: newDone });
-          } else {
-            const remainingToDeduct = deductNum - currentDone;
-            let createdMs = NaN;
-            if (unit.createdAt) {
-              createdMs = new Date(unit.createdAt.replace(' ', 'T')).getTime();
-              if (isNaN(createdMs)) createdMs = new Date(unit.createdAt).getTime();
-            }
-            if (isNaN(createdMs)) createdMs = nowMs;
-
-            const newCreatedMs = Math.min(nowMs, createdMs + remainingToDeduct * 3600 * 1000);
-            const newCreatedAt = formatToYYYYMMDDHHMM(new Date(newCreatedMs));
-
-            updatePpUnit(unit.id, {
-              doneHour: 0,
-              createdAt: newCreatedAt
-            });
-          }
-          affectedPpCount++;
-        }
+      // 2. Update local stores with updated units returned by server
+      if (isProtoSelected && Array.isArray(result.updatedProto) && result.updatedProto.length > 0) {
+        setProtoUnitsDirectly(result.updatedProto);
+      }
+      if (isPpSelected && Array.isArray(result.updatedPp) && result.updatedPp.length > 0) {
+        setPpUnitsDirectly(result.updatedPp);
+      }
+      if (isFieldSelected && Array.isArray(result.updatedField) && result.updatedField.length > 0) {
+        setFieldUnitsDirectly(result.updatedField);
       }
 
-      // 3. DEDUCT FROM FIELD LIVE UNITS
-      if (isFieldSelected && fieldLiveUnits.length > 0) {
-        for (const unit of fieldLiveUnits) {
-          const currentDone = typeof unit.doneHour === 'number' ? unit.doneHour : (parseFloat(String(unit.doneHour || 0)) || 0);
-
-          if (currentDone >= deductNum) {
-            const newDone = Math.max(0, currentDone - deductNum);
-            updateFieldUnit(unit.id, { doneHour: newDone });
-          } else {
-            const remainingToDeduct = deductNum - currentDone;
-            const startRaw = unit.startDateTime || unit.createdAt || '';
-            let startMs = NaN;
-            if (startRaw) {
-              startMs = new Date(startRaw.replace(' ', 'T')).getTime();
-              if (isNaN(startMs)) startMs = new Date(startRaw).getTime();
-            }
-            if (isNaN(startMs)) startMs = nowMs;
-
-            const newStartMs = Math.min(nowMs, startMs + remainingToDeduct * 3600 * 1000);
-            const newStartFormatted = formatToYYYYMMDDHHMM(new Date(newStartMs));
-
-            updateFieldUnit(unit.id, {
-              doneHour: 0,
-              startDateTime: newStartFormatted,
-              createdAt: newStartFormatted
-            });
-          }
-          affectedFieldCount++;
-        }
+      // 3. Broadcast real-time events to all other open browsers/tabs
+      if (isProtoSelected) {
+        broadcastLabRealtimeEvent('proto_units_change', { timestamp: Date.now() });
+      }
+      if (isPpSelected) {
+        broadcastLabRealtimeEvent('pp_units_change', { timestamp: Date.now() });
+      }
+      if (isFieldSelected) {
+        broadcastLabRealtimeEvent('field_units_change', { timestamp: Date.now() });
       }
 
-      const totalAffected = affectedProtoCount + affectedPpCount + affectedFieldCount;
+      // 4. Background fire-and-forget sync to Firestore (so cloud is also updated if quota allows)
+      try {
+        if (isProtoSelected && Array.isArray(result.updatedProto)) {
+          result.updatedProto.filter((u: any) => u.status === 'live').forEach((u: any) => syncProtoUnitToFirestore(u));
+        }
+        if (isPpSelected && Array.isArray(result.updatedPp)) {
+          result.updatedPp.filter((u: any) => u.status === 'live').forEach((u: any) => syncPpUnitToFirestore(u));
+        }
+        if (isFieldSelected && Array.isArray(result.updatedField)) {
+          result.updatedField.filter((u: any) => u.status === 'live').forEach((u: any) => syncFieldUnitToFirestore(u));
+        }
+      } catch (cloudErr) {
+        console.warn('Firestore cloud sync notice:', cloudErr);
+      }
 
-      // Log notification
+      const totalAffected = result.affectedCount || 0;
       const partsSummary = [
-        affectedProtoCount > 0 ? `Proto (${affectedProtoCount})` : null,
-        affectedPpCount > 0 ? `PP (${affectedPpCount})` : null,
-        affectedFieldCount > 0 ? `Field (${affectedFieldCount})` : null
+        result.summary?.proto > 0 ? `Proto (${result.summary.proto})` : null,
+        result.summary?.pp > 0 ? `PP (${result.summary.pp})` : null,
+        result.summary?.field > 0 ? `Field (${result.summary.field})` : null
       ].filter(Boolean).join(', ');
 
       addLabNotification(
         `Live Hours Adjusted: -${deductNum}h`,
-        `Deducted ${deductNum} hours from ${totalAffected} live units across ${partsSummary}.`
+        `Deducted ${deductNum} hours from ${totalAffected} live units across ${partsSummary}. All browsers and cloud synced.`
       );
 
-      // Auditory confirmation
       audioAlarm.playPassChime();
 
       setFeedback({
         type: 'success',
-        message: `Successfully deducted ${deductNum} hours from ${totalAffected} live machines (${partsSummary})! All systems & cloud synced.`,
+        message: `Safalta se ${deductNum} hours kam ho gaye! Server, cloud aur sabhi browsers me sync ho chuka hai (${totalAffected} Live Machines affected).`,
         affectedCount: totalAffected
       });
 
-      // Refresh cache
       refreshLiveUnits();
     } catch (err: any) {
       console.error('Error during live hours deduction:', err);
@@ -511,7 +506,7 @@ export const LiveUnitHourReductionCard: React.FC = () => {
                 <div className="flex items-center gap-2 text-slate-300">
                   <span>Current: <strong className="text-emerald-400">{u.doneHour ?? 0}h</strong></span>
                   <ArrowRight className="w-3 h-3 text-slate-500" />
-                  <span className="text-amber-400 font-bold">Minus {deductNum}h</span>
+                  <span className="text-amber-400 font-bold">New: {Math.max(0, (u.doneHour ?? 0) - deductNum)}h (-{deductNum}h)</span>
                 </div>
               </div>
             ))}
@@ -526,7 +521,7 @@ export const LiveUnitHourReductionCard: React.FC = () => {
                 <div className="flex items-center gap-2 text-slate-300">
                   <span>Current: <strong className="text-emerald-400">{u.doneHour ?? 0}h</strong></span>
                   <ArrowRight className="w-3 h-3 text-slate-500" />
-                  <span className="text-amber-400 font-bold">Minus {deductNum}h</span>
+                  <span className="text-amber-400 font-bold">New: {Math.max(0, (u.doneHour ?? 0) - deductNum)}h (-{deductNum}h)</span>
                 </div>
               </div>
             ))}
@@ -541,7 +536,7 @@ export const LiveUnitHourReductionCard: React.FC = () => {
                 <div className="flex items-center gap-2 text-slate-300">
                   <span>Current: <strong className="text-emerald-400">{u.doneHour ?? 0}h</strong></span>
                   <ArrowRight className="w-3 h-3 text-slate-500" />
-                  <span className="text-amber-400 font-bold">Minus {deductNum}h</span>
+                  <span className="text-amber-400 font-bold">New: {Math.max(0, (u.doneHour ?? 0) - deductNum)}h (-{deductNum}h)</span>
                 </div>
               </div>
             ))}

@@ -1,0 +1,28 @@
+[
+  {
+    "serialNumber": "IDU: AAJJHDKABDKSKDHSKSJS",
+    "status": "finished",
+    "iduSerialNumber": "AAJJHDKABDKSKDHSKSJS",
+    "productType": "IDU",
+    "oduSerialNumber": "",
+    "station": "Station 20",
+    "startDateTime": "2026-09-26 18:10",
+    "requestBy": "Vikram Sir",
+    "remarks": "Durgesh install",
+    "endDateTime": "2026-09-28 18:27",
+    "_pendingSync": true,
+    "id": "field-1790426553178",
+    "createdAt": "2026-09-26 18:12",
+    "observations": [
+      {
+        "timestamp": "2026-09-26 18:12",
+        "text": "E14 Error",
+        "id": "obs-1790426553197-7pb6"
+      }
+    ],
+    "doneHour": 0,
+    "modelName": "HSI19T-S2NB-F",
+    "requiredHour": 6,
+    "updatedAt": "2026-09-28T12:57:00+00:00"
+  }
+]

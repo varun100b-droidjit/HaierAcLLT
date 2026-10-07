@@ -357,6 +357,30 @@ if (db) {
 // Automatically fetch from Firestore / Supabase on init
 initDataSync();
 
+export async function fetchProtoUnitsFromServer(): Promise<ProtoUnit[] | null> {
+  try {
+    const res = await fetch('/api/units/proto');
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && data.success && Array.isArray(data.units) && data.units.length > 0) {
+      return data.units;
+    }
+  } catch (e) {
+    console.warn('[ProtoStore] Server units fetch note:', e);
+  }
+  return null;
+}
+
+export function syncProtoUnitsToServer(units: ProtoUnit[]) {
+  try {
+    fetch('/api/units/proto/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(units)
+    }).catch(() => {});
+  } catch {}
+}
+
 export async function forceSyncProtoUnits(): Promise<ProtoUnit[]> {
   await initDataSync();
   return getProtoUnits();
@@ -364,10 +388,11 @@ export async function forceSyncProtoUnits(): Promise<ProtoUnit[]> {
 
 async function initDataSync() {
   try {
-    // Try fetching from Firestore first
-    const firestoreData = await fetchProtoUnitsFromFirestore();
-    if (firestoreData && firestoreData.length > 0) {
-      const clean = firestoreData.filter(u => u && u.id !== 'proto-101' && u.id !== 'proto-102');
+    // 1. First fetch from local backend server (/api/units/proto)
+    // The server is persistent across all browsers & tabs and not blocked by Firestore quota!
+    const serverData = await fetchProtoUnitsFromServer();
+    if (serverData && serverData.length > 0) {
+      const clean = serverData.filter(u => u && u.id !== 'proto-101' && u.id !== 'proto-102');
       const merged = mergeWithLocalCache(clean);
       protoUnitsCache = merged;
       safeLocalStorageSet(STORAGE_KEY_PROTO_UNITS, merged);
@@ -377,17 +402,35 @@ async function initDataSync() {
       return;
     }
 
-    // Fallback to Supabase
-    const remoteData = await fetchProtoUnitsFromSupabase();
-    if (remoteData && remoteData.length > 0) {
-      const cleanRemote = remoteData.filter(u => u && u.id !== 'proto-101' && u.id !== 'proto-102');
-      const merged = mergeWithLocalCache(cleanRemote);
-      protoUnitsCache = merged;
-      safeLocalStorageSet(STORAGE_KEY_PROTO_UNITS, merged);
-      idbSaveAll('proto_units', merged);
-      notifyListeners();
-      cleanRemote.forEach(u => syncProtoUnitToFirestore(u));
-    }
+    // 2. Fallback to Firestore
+    try {
+      const firestoreData = await fetchProtoUnitsFromFirestore();
+      if (firestoreData && firestoreData.length > 0) {
+        const clean = firestoreData.filter(u => u && u.id !== 'proto-101' && u.id !== 'proto-102');
+        const merged = mergeWithLocalCache(clean);
+        protoUnitsCache = merged;
+        safeLocalStorageSet(STORAGE_KEY_PROTO_UNITS, merged);
+        idbSaveAll('proto_units', merged);
+        notifyListeners();
+        syncProtoUnitsToServer(merged);
+        pushPendingLocalUnitsToFirestore();
+        return;
+      }
+    } catch {}
+
+    // 3. Fallback to Supabase
+    try {
+      const remoteData = await fetchProtoUnitsFromSupabase();
+      if (remoteData && remoteData.length > 0) {
+        const cleanRemote = remoteData.filter(u => u && u.id !== 'proto-101' && u.id !== 'proto-102');
+        const merged = mergeWithLocalCache(cleanRemote);
+        protoUnitsCache = merged;
+        safeLocalStorageSet(STORAGE_KEY_PROTO_UNITS, merged);
+        idbSaveAll('proto_units', merged);
+        notifyListeners();
+        syncProtoUnitsToServer(merged);
+      }
+    } catch {}
   } catch (e) {
     console.warn('Proto Units cloud sync note:', e);
   }
@@ -411,6 +454,8 @@ function saveLocalProtoUnits(data: ProtoUnit[]) {
   idbSaveAll('proto_units', clean);
   // Persist clean copy to localStorage
   safeLocalStorageSet(STORAGE_KEY_PROTO_UNITS, clean);
+  // Persist to server backend immediately
+  syncProtoUnitsToServer(clean);
   if (localProtoBus) {
     try { localProtoBus.postMessage({ timestamp: Date.now() }); } catch {}
   }
