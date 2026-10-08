@@ -394,7 +394,18 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
     const loadData = async () => {
       setSupabaseStatus('syncing');
       try {
-        // 1. Fetch from Firebase Firestore first
+        // 1. Primary Source of Truth: Supabase PostgreSQL
+        const remoteData = await fetchLeakUnitsFromSupabase();
+        if (remoteData && remoteData.length > 0) {
+          if (isMounted) {
+            setLeakRecords(remoteData);
+            try { localStorage.setItem(STORAGE_KEY_SMOG_UNITS, JSON.stringify(remoteData)); } catch {}
+            setSupabaseStatus('connected');
+          }
+          return;
+        }
+
+        // 2. Secondary fallback: Firebase Firestore
         const firestoreData = await fetchSmogLeakUnitsFromFirebase();
         if (firestoreData && firestoreData.length > 0) {
           if (isMounted) {
@@ -405,31 +416,11 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
           return;
         }
 
-        // 2. Fallback to Supabase if Firestore has not yet been populated
-        const remoteData = await fetchLeakUnitsFromSupabase();
-        if (remoteData && remoteData.length > 0) {
-          if (isMounted) {
-            setLeakRecords(remoteData);
-            try { localStorage.setItem(STORAGE_KEY_SMOG_UNITS, JSON.stringify(remoteData)); } catch {}
-            setSupabaseStatus('connected');
-          }
-          // Seed records to Firebase Firestore
-          for (const record of remoteData) {
-            await syncSmogLeakUnitToFirebase(record);
-          }
-        } else {
-          // 3. Sync existing local records to Firebase Firestore & Supabase
-          const local = getSmogUnits();
-          if (isMounted) {
-            setLeakRecords(local);
-          }
-          for (const record of local) {
-            await syncSmogLeakUnitToFirebase(record);
-            await syncLeakUnitToSupabase(record);
-          }
-          if (isMounted) {
-            setSupabaseStatus('connected');
-          }
+        // 3. Local records fallback
+        const local = getSmogUnits();
+        if (isMounted) {
+          setLeakRecords(local);
+          setSupabaseStatus('connected');
         }
       } catch (err) {
         console.warn('Smog leak units initial sync note:', err);
@@ -458,9 +449,12 @@ export const SmogModule: React.FC<SmogModuleProps> = ({
       };
     }
 
-    // Subscribe to cross-device realtime broadcast
-    const unsubscribe = subscribeToLabRealtimeEvents((event) => {
+    // Subscribe to cross-device realtime broadcast & database changes
+    const unsubscribe = subscribeToLabRealtimeEvents((event, payload) => {
       if (event === 'smog_units_change') {
+        if (payload?.deletedId) {
+          setLeakRecords(prev => prev.filter(r => r.id !== payload.deletedId));
+        }
         loadData();
       }
     });

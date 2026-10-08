@@ -388,8 +388,24 @@ export async function forceSyncPpUnits(): Promise<PpUnit[]> {
 
 async function initDataSync() {
   try {
-    // 1. First fetch from local backend server (/api/units/pp)
-    // The server is persistent across all browsers & tabs and not blocked by Firestore quota!
+    // 1. Primary Source of Truth: Supabase PostgreSQL
+    try {
+      const remoteData = await fetchPpUnitsFromSupabase();
+      if (remoteData && remoteData.length > 0) {
+        const cleanRemote = remoteData.filter(u => u && !u.id.startsWith('pp-idu-') && !u.id.startsWith('pp-odu-'));
+        const merged = mergeWithLocalCache(cleanRemote);
+        ppUnitsCache = merged;
+        safeLocalStorageSet(STORAGE_KEY_PP_UNITS, merged);
+        idbSaveAll('pp_units', merged);
+        notifyListeners();
+        syncPpUnitsToServer(merged);
+        return;
+      }
+    } catch (sbErr) {
+      console.warn('Supabase PP fetch notice:', sbErr);
+    }
+
+    // 2. Secondary fallback: Server backend (/api/units/pp)
     const serverData = await fetchPpUnitsFromServer();
     if (serverData && serverData.length > 0) {
       const clean = serverData.filter(u => u && !u.id.startsWith('pp-idu-') && !u.id.startsWith('pp-odu-'));
@@ -402,7 +418,7 @@ async function initDataSync() {
       return;
     }
 
-    // 2. Fallback to Firestore
+    // 3. Tertiary fallback: Firestore
     try {
       const firestoreData = await fetchPpUnitsFromFirestore();
       if (firestoreData && firestoreData.length > 0) {
@@ -415,20 +431,6 @@ async function initDataSync() {
         syncPpUnitsToServer(merged);
         pushPendingLocalUnitsToFirestore();
         return;
-      }
-    } catch {}
-
-    // 3. Fallback to Supabase
-    try {
-      const remoteData = await fetchPpUnitsFromSupabase();
-      if (remoteData && remoteData.length > 0) {
-        const cleanRemote = remoteData.filter(u => u && !u.id.startsWith('pp-idu-') && !u.id.startsWith('pp-odu-'));
-        const merged = mergeWithLocalCache(cleanRemote);
-        ppUnitsCache = merged;
-        safeLocalStorageSet(STORAGE_KEY_PP_UNITS, merged);
-        idbSaveAll('pp_units', merged);
-        notifyListeners();
-        syncPpUnitsToServer(merged);
       }
     } catch {}
   } catch (e) {

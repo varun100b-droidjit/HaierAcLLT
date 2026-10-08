@@ -213,22 +213,26 @@ try {
 
 async function initDataSync() {
   try {
-    // Try fetching from Firestore first
+    // 1. Primary Source of Truth: Supabase PostgreSQL
+    try {
+      const remoteData = await fetchRDUnitsFromSupabase();
+      if (remoteData && remoteData.length > 0) {
+        unitsCache = normalizeUnitTimelines(remoteData);
+        try { localStorage.setItem(STORAGE_KEY_UNITS, JSON.stringify(unitsCache)); } catch {}
+        notifyListeners();
+        return;
+      }
+    } catch (sbErr) {
+      console.warn('Supabase RD fetch notice:', sbErr);
+    }
+
+    // 2. Secondary Fallback: Firestore
     const firestoreData = await fetchRDUnitsFromFirestore();
     if (firestoreData && firestoreData.length > 0) {
       unitsCache = normalizeUnitTimelines(firestoreData);
       try { localStorage.setItem(STORAGE_KEY_UNITS, JSON.stringify(unitsCache)); } catch {}
       notifyListeners();
       return;
-    }
-
-    // Fallback to Supabase
-    const remoteData = await fetchRDUnitsFromSupabase();
-    if (remoteData && remoteData.length > 0) {
-      unitsCache = normalizeUnitTimelines(remoteData);
-      try { localStorage.setItem(STORAGE_KEY_UNITS, JSON.stringify(unitsCache)); } catch {}
-      notifyListeners();
-      remoteData.forEach(u => syncRDUnitToFirestore(u));
     }
   } catch (e) {
     console.warn('RD Units Cloud sync note:', e);

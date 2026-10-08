@@ -283,6 +283,22 @@ initCloudAndLocalReports();
 
 async function initCloudAndLocalReports() {
   try {
+    // 1. Primary Source of Truth: Supabase PostgreSQL
+    try {
+      const remoteReports = await fetchReportRoomFromSupabase();
+      if (remoteReports && remoteReports.length > 0) {
+        const cleanRemote = remoteReports.filter(r => r && r.id !== 'rep-cs-101' && r.id !== 'rep-ce-102');
+        const merged = mergeReportsWithLocal(cleanRemote);
+        savedReportsCache = merged;
+        persistReports(merged);
+        notifyListeners(merged);
+        return;
+      }
+    } catch (sbErr) {
+      console.warn('[ReportRoom] Supabase fetch notice:', sbErr);
+    }
+
+    // 2. Secondary Fallback: Firestore
     const firestoreReports = await fetchReportRoomFromFirestore();
     if (firestoreReports && firestoreReports.length > 0) {
       const cleanFs = firestoreReports.filter(r => r && r.id !== 'rep-cs-101' && r.id !== 'rep-ce-102');
@@ -292,16 +308,6 @@ async function initCloudAndLocalReports() {
       notifyListeners(merged);
       pushPendingReportsToFirestore();
       return;
-    }
-
-    const remoteReports = await fetchReportRoomFromSupabase();
-    if (remoteReports && remoteReports.length > 0) {
-      const cleanRemote = remoteReports.filter(r => r && r.id !== 'rep-cs-101' && r.id !== 'rep-ce-102');
-      const merged = mergeReportsWithLocal(cleanRemote);
-      savedReportsCache = merged;
-      persistReports(merged);
-      notifyListeners(merged);
-      cleanRemote.forEach((r: SavedReport) => syncReportRoomToFirestore(r));
     }
   } catch (err) {
     console.warn('[ReportRoom] Failed to load from remote:', err);

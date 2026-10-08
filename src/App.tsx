@@ -519,6 +519,7 @@ export function MainApp() {
                     theme={theme}
                     onToggleTheme={handleToggleTheme}
                     onOpenSupabaseModal={() => setIsSupabaseModalOpen(true)}
+                    onNavigateToProtoUnits={() => setActiveTab('proto-units')}
                   />
                 ) : (
                   <div className="flex flex-col items-center justify-center min-h-[420px] p-8 bg-slate-900/60 border border-slate-800 rounded-2xl text-center">

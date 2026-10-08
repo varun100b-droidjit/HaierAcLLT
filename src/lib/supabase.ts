@@ -7,7 +7,8 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIU
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 /* ==========================================
-   GLOBAL REAL-TIME CROSS-DEVICE BROADCAST HUB
+   GLOBAL REAL-TIME CROSS-DEVICE EVENT HUB
+   (Supabase postgres_changes + Broadcast fallback)
    ========================================== */
 export type LabRealtimeEventType = 
   | 'shift_change' 
@@ -22,25 +23,106 @@ export type LabRealtimeEventType =
   | 'bsr_records_change'
   | 'models_change';
 
-const realtimeChannel = supabase.channel('llt_lab_global_realtime');
 const realtimeListeners = new Set<(event: string, payload: any) => void>();
 
-realtimeChannel
-  .on('broadcast', { event: '*' }, (data: any) => {
+// Map Supabase table names directly to application realtime event types
+const TABLE_EVENT_MAP: Record<string, LabRealtimeEventType> = {
+  proto_units: 'proto_units_change',
+  pp_units: 'pp_units_change',
+  field_units: 'field_units_change',
+  rd_units: 'rd_units_change',
+  smog_leak_units: 'smog_units_change',
+  smog_qty_records: 'smog_units_change',
+  report_room_reports: 'reports_change',
+  system_settings: 'shift_change',
+  model_master: 'models_change',
+  elt_records: 'elt_records_change',
+  bsr_records: 'bsr_records_change',
+};
+
+// Global unified Realtime Channel
+const realtimeChannel = supabase.channel('llt_lab_unified_realtime', {
+  config: {
+    broadcast: { self: false },
+  }
+});
+
+// 1. Broadcast listener (for lightweight fast pings across active clients)
+realtimeChannel.on('broadcast', { event: '*' }, (data: any) => {
+  try {
+    const eventName = data.event;
+    const payload = data.payload || {};
+    console.log('[Supabase Realtime Broadcast]', eventName, payload);
+    realtimeListeners.forEach(listener => {
+      try { listener(eventName, payload); } catch (e) { console.warn(e); }
+    });
+  } catch (err) {
+    console.warn('Realtime broadcast dispatch error:', err);
+  }
+});
+
+// 2. PostgreSQL Database Level Realtime Listener (postgres_changes)
+// Fires automatically whenever ANY device (phone/PC) performs INSERT, UPDATE, or DELETE in the database
+realtimeChannel.on(
+  'postgres_changes',
+  { event: '*', schema: 'public' },
+  (payload: any) => {
     try {
-      const eventName = data.event;
-      const payload = data.payload;
-      console.log('[Supabase Realtime] Event received:', eventName, payload);
+      const { table, eventType, new: newRow, old: oldRow } = payload;
+      const targetEvent = TABLE_EVENT_MAP[table];
+      if (!targetEvent) return;
+
+      console.log(`[Supabase DB WAL Event] Table: ${table} | Type: ${eventType}`, payload);
+
+      const dispatchPayload: any = {
+        source: 'postgres_changes',
+        table,
+        eventType, // 'INSERT' | 'UPDATE' | 'DELETE'
+        row: newRow || oldRow,
+        recordId: newRow?.id || oldRow?.id,
+        timestamp: Date.now()
+      };
+
+      if (eventType === 'DELETE') {
+        dispatchPayload.deletedId = oldRow?.id;
+      }
+
       realtimeListeners.forEach(listener => {
-        try { listener(eventName, payload); } catch (e) { console.warn(e); }
+        try { listener(targetEvent, dispatchPayload); } catch (e) { console.warn(e); }
       });
     } catch (err) {
-      console.warn('Realtime channel message error:', err);
+      console.warn('Realtime postgres_changes dispatch error:', err);
     }
-  })
-  .subscribe((status: string) => {
-    console.log('[Supabase Realtime] Channel status:', status);
+  }
+);
+
+// Subscribe channel with auto-retry
+realtimeChannel.subscribe((status: string, err?: any) => {
+  console.log('[Supabase Realtime Channel Status]:', status, err ? err.message : '');
+});
+
+// Auto-reconnect on visibility and online events (essential for mobile devices sleeping / tab switching)
+if (typeof window !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      try {
+        if (realtimeChannel.state !== 'joined' && realtimeChannel.state !== 'joining') {
+          realtimeChannel.subscribe();
+        }
+      } catch (e) {
+        console.warn('Realtime reconnect notice:', e);
+      }
+    }
   });
+
+  window.addEventListener('online', () => {
+    try {
+      realtimeChannel.subscribe();
+    } catch (e) {
+      console.warn('Realtime online reconnect notice:', e);
+    }
+  });
+}
 
 export function broadcastLabRealtimeEvent(event: LabRealtimeEventType, payload: any = {}) {
   try {
@@ -717,11 +799,11 @@ export async function testAllSupabaseTables(): Promise<{
    ========================================== */
 
 export const SUPABASE_SQL_SCHEMA = `-- ==========================================================
--- LLT LABS - COMPLETE SUPABASE DATABASE SETUP SCRIPT
--- Copy and run this entire script in Supabase SQL Editor
+-- LLT LABS - COMPLETE NEW SUPABASE DATABASE PREPARATION SQL
+-- Compatible with Security Option A and Realtime Multi-Device Sync
 -- ==========================================================
 
--- 1. Enable UUID extension
+-- 1. Enable UUID Extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ----------------------------------------------------------
@@ -736,6 +818,7 @@ CREATE TABLE IF NOT EXISTS public.proto_units (
     request_by TEXT,
     test_purpose TEXT,
     required_hour NUMERIC DEFAULT 0,
+    done_hour NUMERIC DEFAULT 0,
     report_details JSONB DEFAULT '{}'::jsonb,
     name_plate JSONB DEFAULT '{}'::jsonb,
     parts_info JSONB DEFAULT '{}'::jsonb,
@@ -743,6 +826,9 @@ CREATE TABLE IF NOT EXISTS public.proto_units (
     remarks TEXT,
     observations JSONB DEFAULT '[]'::jsonb,
     status TEXT DEFAULT 'live',
+    start_date_time TEXT,
+    end_date_time TEXT,
+    completed_at TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -759,6 +845,7 @@ CREATE TABLE IF NOT EXISTS public.pp_units (
     request_by TEXT,
     test_purpose TEXT,
     required_hour NUMERIC DEFAULT 0,
+    done_hour NUMERIC DEFAULT 0,
     report_details JSONB DEFAULT '{}'::jsonb,
     name_plate JSONB DEFAULT '{}'::jsonb,
     parts_info JSONB DEFAULT '{}'::jsonb,
@@ -766,6 +853,9 @@ CREATE TABLE IF NOT EXISTS public.pp_units (
     remarks TEXT,
     observations JSONB DEFAULT '[]'::jsonb,
     status TEXT DEFAULT 'live',
+    start_date_time TEXT,
+    end_date_time TEXT,
+    completed_at TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -776,7 +866,7 @@ CREATE TABLE IF NOT EXISTS public.pp_units (
 CREATE TABLE IF NOT EXISTS public.field_units (
     id TEXT PRIMARY KEY,
     model_name TEXT,
-    product_type TEXT,
+    product_type TEXT DEFAULT 'BOTH',
     idu_serial_number TEXT,
     odu_serial_number TEXT,
     serial_number TEXT,
@@ -785,15 +875,17 @@ CREATE TABLE IF NOT EXISTS public.field_units (
     start_date_time TEXT,
     end_date_time TEXT,
     required_hour NUMERIC DEFAULT 0,
+    done_hour NUMERIC DEFAULT 0,
     status TEXT DEFAULT 'live',
     remarks TEXT,
     observations JSONB DEFAULT '[]'::jsonb,
+    photos JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ----------------------------------------------------------
--- 5. TABLE: rd_units (R&D Transfer Units & Tracking)
+-- 5. TABLE: rd_units (Unit Testing / R&D Transfer Units)
 -- ----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.rd_units (
     id TEXT PRIMARY KEY,
@@ -837,7 +929,75 @@ CREATE TABLE IF NOT EXISTS public.smog_leak_units (
 );
 
 -- ----------------------------------------------------------
--- 7. TABLE: report_room_reports (Archived Lab Reports)
+-- 7. TABLE: smog_qty_records (Smog Daily Production Qty & Models)
+-- ----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.smog_qty_records (
+    id TEXT PRIMARY KEY,
+    date TEXT NOT NULL,
+    shift TEXT NOT NULL,
+    smog_qty NUMERIC DEFAULT 0,
+    pr_qty NUMERIC DEFAULT 0,
+    pending_qty NUMERIC DEFAULT 0,
+    models JSONB DEFAULT '[]'::jsonb,
+    notes TEXT,
+    is_closed BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ----------------------------------------------------------
+-- 8. TABLE: model_master (Model Master / Material Code Library)
+-- ----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.model_master (
+    id TEXT PRIMARY KEY,
+    model_name TEXT NOT NULL,
+    material_code TEXT NOT NULL,
+    product_category TEXT DEFAULT 'Split AC',
+    capacity TEXT,
+    star_rating TEXT,
+    refrigerant TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ----------------------------------------------------------
+-- 9. TABLE: elt_records (In-Out ELT Records)
+-- ----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.elt_records (
+    id TEXT PRIMARY KEY,
+    serial_number TEXT NOT NULL,
+    model_name TEXT,
+    in_date TEXT,
+    in_time TEXT,
+    out_date TEXT,
+    out_time TEXT,
+    status TEXT DEFAULT 'IN',
+    operator_name TEXT,
+    remarks TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ----------------------------------------------------------
+-- 10. TABLE: bsr_records (In-Out BSR Records)
+-- ----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.bsr_records (
+    id TEXT PRIMARY KEY,
+    serial_number TEXT NOT NULL,
+    model_name TEXT,
+    in_date TEXT,
+    in_time TEXT,
+    out_date TEXT,
+    out_time TEXT,
+    status TEXT DEFAULT 'IN',
+    operator_name TEXT,
+    remarks TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ----------------------------------------------------------
+-- 11. TABLE: report_room_reports (Archived Lab Reports)
 -- ----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.report_room_reports (
     id TEXT PRIMARY KEY,
@@ -861,7 +1021,38 @@ CREATE TABLE IF NOT EXISTS public.report_room_reports (
 );
 
 -- ----------------------------------------------------------
--- 8. TABLE: system_settings (Global Lab Shifts & Config)
+-- 12. TABLE: report_templates (Master DOCX Report Templates)
+-- ----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.report_templates (
+    id TEXT PRIMARY KEY,
+    report_type TEXT NOT NULL,
+    file_name TEXT,
+    file_size NUMERIC DEFAULT 0,
+    uploaded_at TEXT,
+    base64_data TEXT,
+    chunks JSONB DEFAULT '[]'::jsonb,
+    is_chunked BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ----------------------------------------------------------
+-- 13. TABLE: activity_logs (Audit Trail & Activity History)
+-- ----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.activity_logs (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    description TEXT,
+    activity_type TEXT,
+    shift_name TEXT,
+    operator_name TEXT,
+    unit_id TEXT,
+    timestamp TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ----------------------------------------------------------
+-- 14. TABLE: system_settings (Global Lab Shifts & Config)
 -- ----------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.system_settings (
     id TEXT PRIMARY KEY,
@@ -873,44 +1064,83 @@ CREATE TABLE IF NOT EXISTS public.system_settings (
 );
 
 -- ----------------------------------------------------------
--- 9. ENABLE ROW LEVEL SECURITY (RLS) & ALLOW ALL PERMISSIVE ACCESS
+-- 15. ROW LEVEL SECURITY (RLS) - SECURITY OPTION A
+-- Read-Only for Browser/Anon; Write operations via Server Service-Role
 -- ----------------------------------------------------------
-
 ALTER TABLE public.proto_units ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.pp_units ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.field_units ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.rd_units ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.smog_leak_units ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.smog_qty_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.model_master ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.elt_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.bsr_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.report_room_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.report_templates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.activity_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.system_settings ENABLE ROW LEVEL SECURITY;
 
--- Drop existing policies if any to avoid duplication errors
-DROP POLICY IF EXISTS "Allow public all proto_units" ON public.proto_units;
-DROP POLICY IF EXISTS "Allow public all pp_units" ON public.pp_units;
-DROP POLICY IF EXISTS "Allow public all field_units" ON public.field_units;
-DROP POLICY IF EXISTS "Allow public all rd_units" ON public.rd_units;
-DROP POLICY IF EXISTS "Allow public all smog_leak_units" ON public.smog_leak_units;
-DROP POLICY IF EXISTS "Allow public all report_room_reports" ON public.report_room_reports;
-DROP POLICY IF EXISTS "Allow public all system_settings" ON public.system_settings;
+-- Clean existing policies
+DROP POLICY IF EXISTS "Allow anon select proto_units" ON public.proto_units;
+DROP POLICY IF EXISTS "Allow anon select pp_units" ON public.pp_units;
+DROP POLICY IF EXISTS "Allow anon select field_units" ON public.field_units;
+DROP POLICY IF EXISTS "Allow anon select rd_units" ON public.rd_units;
+DROP POLICY IF EXISTS "Allow anon select smog_leak_units" ON public.smog_leak_units;
+DROP POLICY IF EXISTS "Allow anon select smog_qty_records" ON public.smog_qty_records;
+DROP POLICY IF EXISTS "Allow anon select model_master" ON public.model_master;
+DROP POLICY IF EXISTS "Allow anon select elt_records" ON public.elt_records;
+DROP POLICY IF EXISTS "Allow anon select bsr_records" ON public.bsr_records;
+DROP POLICY IF EXISTS "Allow anon select report_room_reports" ON public.report_room_reports;
+DROP POLICY IF EXISTS "Allow anon select report_templates" ON public.report_templates;
+DROP POLICY IF EXISTS "Allow anon select activity_logs" ON public.activity_logs;
+DROP POLICY IF EXISTS "Allow anon select system_settings" ON public.system_settings;
 
--- Create Open Access Policies for Web Application Client
-CREATE POLICY "Allow public all proto_units" ON public.proto_units FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public all pp_units" ON public.pp_units FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public all field_units" ON public.field_units FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public all rd_units" ON public.rd_units FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public all smog_leak_units" ON public.smog_leak_units FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public all report_room_reports" ON public.report_room_reports FOR ALL USING (true) WITH CHECK (true);
-CREATE POLICY "Allow public all system_settings" ON public.system_settings FOR ALL USING (true) WITH CHECK (true);
+-- Create Safe Read-Only SELECT policies (Required for Realtime postgres_changes events!)
+CREATE POLICY "Allow anon select proto_units" ON public.proto_units FOR SELECT USING (true);
+CREATE POLICY "Allow anon select pp_units" ON public.pp_units FOR SELECT USING (true);
+CREATE POLICY "Allow anon select field_units" ON public.field_units FOR SELECT USING (true);
+CREATE POLICY "Allow anon select rd_units" ON public.rd_units FOR SELECT USING (true);
+CREATE POLICY "Allow anon select smog_leak_units" ON public.smog_leak_units FOR SELECT USING (true);
+CREATE POLICY "Allow anon select smog_qty_records" ON public.smog_qty_records FOR SELECT USING (true);
+CREATE POLICY "Allow anon select model_master" ON public.model_master FOR SELECT USING (true);
+CREATE POLICY "Allow anon select elt_records" ON public.elt_records FOR SELECT USING (true);
+CREATE POLICY "Allow anon select bsr_records" ON public.bsr_records FOR SELECT USING (true);
+CREATE POLICY "Allow anon select report_room_reports" ON public.report_room_reports FOR SELECT USING (true);
+CREATE POLICY "Allow anon select report_templates" ON public.report_templates FOR SELECT USING (true);
+CREATE POLICY "Allow anon select activity_logs" ON public.activity_logs FOR SELECT USING (true);
+CREATE POLICY "Allow anon select system_settings" ON public.system_settings FOR SELECT USING (true);
 
 -- ----------------------------------------------------------
--- 10. CREATE INDEXES FOR FAST QUERYING & SEARCH
+-- 16. ADD ALL 13 TABLES TO SUPABASE REALTIME PUBLICATION
+-- ----------------------------------------------------------
+ALTER PUBLICATION supabase_realtime ADD TABLE public.proto_units;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.pp_units;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.field_units;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.rd_units;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.smog_leak_units;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.smog_qty_records;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.model_master;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.elt_records;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.bsr_records;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.report_room_reports;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.report_templates;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.system_settings;
+
+-- ----------------------------------------------------------
+-- 17. CREATE PERFORMANCE INDEXES
 -- ----------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_proto_created ON public.proto_units (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pp_created ON public.pp_units (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_field_created ON public.field_units (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_rd_created ON public.rd_units (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_smog_created ON public.smog_leak_units (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_smog_qty_date ON public.smog_qty_records (date, shift);
 CREATE INDEX IF NOT EXISTS idx_reports_created ON public.report_room_reports (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_model_code ON public.model_master (material_code);
+CREATE INDEX IF NOT EXISTS idx_elt_serial ON public.elt_records (serial_number);
+CREATE INDEX IF NOT EXISTS idx_bsr_serial ON public.bsr_records (serial_number);
 `;
 
 

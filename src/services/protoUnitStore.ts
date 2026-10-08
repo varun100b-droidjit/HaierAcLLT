@@ -388,8 +388,24 @@ export async function forceSyncProtoUnits(): Promise<ProtoUnit[]> {
 
 async function initDataSync() {
   try {
-    // 1. First fetch from local backend server (/api/units/proto)
-    // The server is persistent across all browsers & tabs and not blocked by Firestore quota!
+    // 1. Primary Source of Truth: Supabase PostgreSQL
+    try {
+      const remoteData = await fetchProtoUnitsFromSupabase();
+      if (remoteData && remoteData.length > 0) {
+        const cleanRemote = remoteData.filter(u => u && u.id !== 'proto-101' && u.id !== 'proto-102');
+        const merged = mergeWithLocalCache(cleanRemote);
+        protoUnitsCache = merged;
+        safeLocalStorageSet(STORAGE_KEY_PROTO_UNITS, merged);
+        idbSaveAll('proto_units', merged);
+        notifyListeners();
+        syncProtoUnitsToServer(merged);
+        return;
+      }
+    } catch (sbErr) {
+      console.warn('Supabase proto fetch notice:', sbErr);
+    }
+
+    // 2. Secondary fallback: Server backend (/api/units/proto)
     const serverData = await fetchProtoUnitsFromServer();
     if (serverData && serverData.length > 0) {
       const clean = serverData.filter(u => u && u.id !== 'proto-101' && u.id !== 'proto-102');
@@ -402,7 +418,7 @@ async function initDataSync() {
       return;
     }
 
-    // 2. Fallback to Firestore
+    // 3. Tertiary fallback: Firestore
     try {
       const firestoreData = await fetchProtoUnitsFromFirestore();
       if (firestoreData && firestoreData.length > 0) {
@@ -415,20 +431,6 @@ async function initDataSync() {
         syncProtoUnitsToServer(merged);
         pushPendingLocalUnitsToFirestore();
         return;
-      }
-    } catch {}
-
-    // 3. Fallback to Supabase
-    try {
-      const remoteData = await fetchProtoUnitsFromSupabase();
-      if (remoteData && remoteData.length > 0) {
-        const cleanRemote = remoteData.filter(u => u && u.id !== 'proto-101' && u.id !== 'proto-102');
-        const merged = mergeWithLocalCache(cleanRemote);
-        protoUnitsCache = merged;
-        safeLocalStorageSet(STORAGE_KEY_PROTO_UNITS, merged);
-        idbSaveAll('proto_units', merged);
-        notifyListeners();
-        syncProtoUnitsToServer(merged);
       }
     } catch {}
   } catch (e) {

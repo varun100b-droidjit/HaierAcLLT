@@ -469,6 +469,44 @@ CRITICAL INSTRUCTIONS:
     }
   });
 
+  // -------------------------------------------------------------
+  // Real-Time Server-Sent Events (SSE) Hub for Instant Cross-Device Sync
+  // -------------------------------------------------------------
+  const sseClients = new Set<express.Response>();
+
+  app.get('/api/events', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    sseClients.add(res);
+    res.write(`data: ${JSON.stringify({ type: 'connected', timestamp: Date.now() })}\n\n`);
+
+    req.on('close', () => {
+      sseClients.delete(res);
+    });
+  });
+
+  setInterval(() => {
+    const pingMessage = `: ping\n\n`;
+    sseClients.forEach(client => {
+      try { client.write(pingMessage); } catch { sseClients.delete(client); }
+    });
+  }, 20000);
+
+  const broadcastServerEvent = (type: string, data: any = {}) => {
+    const payload = JSON.stringify({ type, data, timestamp: Date.now() });
+    const message = `data: ${payload}\n\n`;
+    sseClients.forEach(client => {
+      try {
+        client.write(message);
+      } catch {
+        sseClients.delete(client);
+      }
+    });
+  };
+
   // Smog Qty Records server-side persistence fallback & backup
   const smogQtyBackupDir = path.join(process.cwd(), '.data');
   const smogQtyBackupFile = path.join(smogQtyBackupDir, 'smog_qty_records.json');
@@ -519,6 +557,7 @@ CRITICAL INSTRUCTIONS:
         });
       }
       saveSmogQtyBackup(records);
+      broadcastServerEvent('smog_units_change', { action: 'sync_qty', record });
       return res.json({ success: true, count: records.length });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });
@@ -536,11 +575,17 @@ CRITICAL INSTRUCTIONS:
   });
 
   // ========================================================
-  // Proto, PP, and Field Units Server-Side Persistence & Live Hours Reduction
+  // Proto, PP, Field, RD, Models, and In-Out Server-Side Persistence
   // ========================================================
   const protoUnitsBackupFile = path.join(smogQtyBackupDir, 'proto_units.json');
   const ppUnitsBackupFile = path.join(smogQtyBackupDir, 'pp_units.json');
   const fieldUnitsBackupFile = path.join(smogQtyBackupDir, 'field_units.json');
+  const rdUnitsBackupFile = path.join(smogQtyBackupDir, 'rd_units.json');
+  const activityLogsBackupFile = path.join(smogQtyBackupDir, 'activity_logs.json');
+  const smogLeakBackupFile = path.join(smogQtyBackupDir, 'smog_leak_units.json');
+  const modelsBackupFile = path.join(smogQtyBackupDir, 'models.json');
+  const eltBackupFile = path.join(smogQtyBackupDir, 'elt_records.json');
+  const bsrBackupFile = path.join(smogQtyBackupDir, 'bsr_records.json');
 
   const getUnitsFile = (filePath: string): any[] => {
     try {
@@ -576,7 +621,7 @@ CRITICAL INSTRUCTIONS:
   };
 
   const upsertUnitInFile = (filePath: string, unit: any) => {
-    if (!unit || !unit.id) return [];
+    if (!unit || !unit.id) return getUnitsFile(filePath);
     const list = getUnitsFile(filePath);
     const idx = list.findIndex(u => u.id === unit.id);
     if (idx >= 0) {
@@ -596,17 +641,26 @@ CRITICAL INSTRUCTIONS:
   app.post('/api/units/proto/sync', (req, res) => {
     try {
       const payload = req.body;
+      const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+
       if (Array.isArray(payload)) {
+        if (isReplace) {
+          saveUnitsFile(protoUnitsBackupFile, payload);
+          broadcastServerEvent('proto_units_change', { action: 'replace', count: payload.length });
+          return res.json({ success: true, count: payload.length });
+        }
         const list = getUnitsFile(protoUnitsBackupFile);
         const map = new Map(list.map(u => [u.id, u]));
         payload.forEach(u => {
-          if (u && u.id) map.set(u.id, { ...map.get(u.id), ...u });
+          if (u && u.id) map.set(u.id, { ...(map.get(u.id) || {}), ...u });
         });
         const merged = Array.from(map.values());
         saveUnitsFile(protoUnitsBackupFile, merged);
+        broadcastServerEvent('proto_units_change', { action: 'sync', count: merged.length });
         return res.json({ success: true, count: merged.length });
       }
       const updated = upsertUnitInFile(protoUnitsBackupFile, payload);
+      broadcastServerEvent('proto_units_change', { action: 'upsert', unitId: payload?.id, count: updated.length });
       return res.json({ success: true, count: updated.length });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });
@@ -617,6 +671,7 @@ CRITICAL INSTRUCTIONS:
     try {
       const list = getUnitsFile(protoUnitsBackupFile).filter(u => u.id !== req.params.id);
       saveUnitsFile(protoUnitsBackupFile, list);
+      broadcastServerEvent('proto_units_change', { action: 'delete', deletedId: req.params.id });
       return res.json({ success: true });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });
@@ -631,17 +686,26 @@ CRITICAL INSTRUCTIONS:
   app.post('/api/units/pp/sync', (req, res) => {
     try {
       const payload = req.body;
+      const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+
       if (Array.isArray(payload)) {
+        if (isReplace) {
+          saveUnitsFile(ppUnitsBackupFile, payload);
+          broadcastServerEvent('pp_units_change', { action: 'replace', count: payload.length });
+          return res.json({ success: true, count: payload.length });
+        }
         const list = getUnitsFile(ppUnitsBackupFile);
         const map = new Map(list.map(u => [u.id, u]));
         payload.forEach(u => {
-          if (u && u.id) map.set(u.id, { ...map.get(u.id), ...u });
+          if (u && u.id) map.set(u.id, { ...(map.get(u.id) || {}), ...u });
         });
         const merged = Array.from(map.values());
         saveUnitsFile(ppUnitsBackupFile, merged);
+        broadcastServerEvent('pp_units_change', { action: 'sync', count: merged.length });
         return res.json({ success: true, count: merged.length });
       }
       const updated = upsertUnitInFile(ppUnitsBackupFile, payload);
+      broadcastServerEvent('pp_units_change', { action: 'upsert', unitId: payload?.id, count: updated.length });
       return res.json({ success: true, count: updated.length });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });
@@ -652,6 +716,7 @@ CRITICAL INSTRUCTIONS:
     try {
       const list = getUnitsFile(ppUnitsBackupFile).filter(u => u.id !== req.params.id);
       saveUnitsFile(ppUnitsBackupFile, list);
+      broadcastServerEvent('pp_units_change', { action: 'delete', deletedId: req.params.id });
       return res.json({ success: true });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });
@@ -666,17 +731,26 @@ CRITICAL INSTRUCTIONS:
   app.post('/api/units/field/sync', (req, res) => {
     try {
       const payload = req.body;
+      const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+
       if (Array.isArray(payload)) {
+        if (isReplace) {
+          saveUnitsFile(fieldUnitsBackupFile, payload);
+          broadcastServerEvent('field_units_change', { action: 'replace', count: payload.length });
+          return res.json({ success: true, count: payload.length });
+        }
         const list = getUnitsFile(fieldUnitsBackupFile);
         const map = new Map(list.map(u => [u.id, u]));
         payload.forEach(u => {
-          if (u && u.id) map.set(u.id, { ...map.get(u.id), ...u });
+          if (u && u.id) map.set(u.id, { ...(map.get(u.id) || {}), ...u });
         });
         const merged = Array.from(map.values());
         saveUnitsFile(fieldUnitsBackupFile, merged);
+        broadcastServerEvent('field_units_change', { action: 'sync', count: merged.length });
         return res.json({ success: true, count: merged.length });
       }
       const updated = upsertUnitInFile(fieldUnitsBackupFile, payload);
+      broadcastServerEvent('field_units_change', { action: 'upsert', unitId: payload?.id, count: updated.length });
       return res.json({ success: true, count: updated.length });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });
@@ -687,6 +761,266 @@ CRITICAL INSTRUCTIONS:
     try {
       const list = getUnitsFile(fieldUnitsBackupFile).filter(u => u.id !== req.params.id);
       saveUnitsFile(fieldUnitsBackupFile, list);
+      broadcastServerEvent('field_units_change', { action: 'delete', deletedId: req.params.id });
+      return res.json({ success: true });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // RD units (Unit Testing) endpoints
+  app.get('/api/units/rd', (_req, res) => {
+    res.json({ success: true, units: getUnitsFile(rdUnitsBackupFile) });
+  });
+
+  app.post('/api/units/rd/sync', (req, res) => {
+    try {
+      const payload = req.body;
+      const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+
+      if (Array.isArray(payload)) {
+        if (isReplace) {
+          saveUnitsFile(rdUnitsBackupFile, payload);
+          broadcastServerEvent('rd_units_change', { action: 'replace', count: payload.length });
+          return res.json({ success: true, count: payload.length });
+        }
+        const list = getUnitsFile(rdUnitsBackupFile);
+        const map = new Map(list.map(u => [u.id, u]));
+        payload.forEach(u => {
+          if (u && u.id) map.set(u.id, { ...(map.get(u.id) || {}), ...u });
+        });
+        const merged = Array.from(map.values());
+        saveUnitsFile(rdUnitsBackupFile, merged);
+        broadcastServerEvent('rd_units_change', { action: 'sync', count: merged.length });
+        return res.json({ success: true, count: merged.length });
+      }
+      const updated = upsertUnitInFile(rdUnitsBackupFile, payload);
+      broadcastServerEvent('rd_units_change', { action: 'upsert', unitId: payload?.id, count: updated.length });
+      return res.json({ success: true, count: updated.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.delete('/api/units/rd/:id', (req, res) => {
+    try {
+      const list = getUnitsFile(rdUnitsBackupFile).filter(u => u.id !== req.params.id);
+      saveUnitsFile(rdUnitsBackupFile, list);
+      broadcastServerEvent('rd_units_change', { action: 'delete', deletedId: req.params.id });
+      return res.json({ success: true });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Activity Logs endpoints
+  app.get('/api/logs', (_req, res) => {
+    res.json({ success: true, logs: getUnitsFile(activityLogsBackupFile) });
+  });
+
+  app.post('/api/logs/sync', (req, res) => {
+    try {
+      const payload = req.body;
+      const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+
+      if (Array.isArray(payload)) {
+        if (isReplace) {
+          saveUnitsFile(activityLogsBackupFile, payload);
+          broadcastServerEvent('activity_logs_change', { action: 'replace', count: payload.length });
+          return res.json({ success: true, count: payload.length });
+        }
+        const list = getUnitsFile(activityLogsBackupFile);
+        const map = new Map(list.map(l => [l.id, l]));
+        payload.forEach(l => {
+          if (l && l.id) map.set(l.id, { ...(map.get(l.id) || {}), ...l });
+        });
+        const merged = Array.from(map.values());
+        saveUnitsFile(activityLogsBackupFile, merged);
+        broadcastServerEvent('activity_logs_change', { action: 'sync', count: merged.length });
+        return res.json({ success: true, count: merged.length });
+      }
+      const updated = upsertUnitInFile(activityLogsBackupFile, payload);
+      broadcastServerEvent('activity_logs_change', { action: 'upsert', logId: payload?.id, count: updated.length });
+      return res.json({ success: true, count: updated.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Smog Leak Units endpoints
+  app.get('/api/smog/leak-units', (_req, res) => {
+    res.json({ success: true, units: getUnitsFile(smogLeakBackupFile) });
+  });
+
+  app.post('/api/smog/leak-units/sync', (req, res) => {
+    try {
+      const payload = req.body;
+      const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+
+      if (Array.isArray(payload)) {
+        if (isReplace) {
+          saveUnitsFile(smogLeakBackupFile, payload);
+          broadcastServerEvent('smog_units_change', { action: 'replace', count: payload.length });
+          return res.json({ success: true, count: payload.length });
+        }
+        const list = getUnitsFile(smogLeakBackupFile);
+        const map = new Map(list.map(u => [u.id, u]));
+        payload.forEach(u => {
+          if (u && u.id) map.set(u.id, { ...(map.get(u.id) || {}), ...u });
+        });
+        const merged = Array.from(map.values());
+        saveUnitsFile(smogLeakBackupFile, merged);
+        broadcastServerEvent('smog_units_change', { action: 'sync', count: merged.length });
+        return res.json({ success: true, count: merged.length });
+      }
+      const updated = upsertUnitInFile(smogLeakBackupFile, payload);
+      broadcastServerEvent('smog_units_change', { action: 'upsert', unitId: payload?.id, count: updated.length });
+      return res.json({ success: true, count: updated.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.delete('/api/smog/leak-units/:id', (req, res) => {
+    try {
+      const list = getUnitsFile(smogLeakBackupFile).filter(u => u.id !== req.params.id);
+      saveUnitsFile(smogLeakBackupFile, list);
+      broadcastServerEvent('smog_units_change', { action: 'delete', deletedId: req.params.id });
+      return res.json({ success: true });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Model List / Model Master endpoints
+  app.get('/api/models', (_req, res) => {
+    res.json({ success: true, models: getUnitsFile(modelsBackupFile) });
+  });
+
+  app.post('/api/models/sync', (req, res) => {
+    try {
+      const payload = req.body;
+      const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+
+      if (Array.isArray(payload)) {
+        if (isReplace) {
+          saveUnitsFile(modelsBackupFile, payload);
+          broadcastServerEvent('models_change', { action: 'replace', count: payload.length });
+          return res.json({ success: true, count: payload.length });
+        }
+        const list = getUnitsFile(modelsBackupFile);
+        const map = new Map(list.map(m => [m.id, m]));
+        payload.forEach(m => {
+          if (m && m.id) map.set(m.id, { ...(map.get(m.id) || {}), ...m });
+        });
+        const merged = Array.from(map.values());
+        saveUnitsFile(modelsBackupFile, merged);
+        broadcastServerEvent('models_change', { action: 'sync', count: merged.length });
+        return res.json({ success: true, count: merged.length });
+      }
+      const updated = upsertUnitInFile(modelsBackupFile, payload);
+      broadcastServerEvent('models_change', { action: 'upsert', modelId: payload?.id, count: updated.length });
+      return res.json({ success: true, count: updated.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.delete('/api/models/:id', (req, res) => {
+    try {
+      const list = getUnitsFile(modelsBackupFile).filter(m => m.id !== req.params.id);
+      saveUnitsFile(modelsBackupFile, list);
+      broadcastServerEvent('models_change', { action: 'delete', deletedId: req.params.id });
+      return res.json({ success: true });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // In-Out ELT Records endpoints
+  app.get('/api/in-out/elt', (_req, res) => {
+    res.json({ success: true, records: getUnitsFile(eltBackupFile) });
+  });
+
+  app.post('/api/in-out/elt/sync', (req, res) => {
+    try {
+      const payload = req.body;
+      const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+
+      if (Array.isArray(payload)) {
+        if (isReplace) {
+          saveUnitsFile(eltBackupFile, payload);
+          broadcastServerEvent('elt_records_change', { action: 'replace', count: payload.length });
+          return res.json({ success: true, count: payload.length });
+        }
+        const list = getUnitsFile(eltBackupFile);
+        const map = new Map(list.map(r => [r.id, r]));
+        payload.forEach(r => {
+          if (r && r.id) map.set(r.id, { ...(map.get(r.id) || {}), ...r });
+        });
+        const merged = Array.from(map.values());
+        saveUnitsFile(eltBackupFile, merged);
+        broadcastServerEvent('elt_records_change', { action: 'sync', count: merged.length });
+        return res.json({ success: true, count: merged.length });
+      }
+      const updated = upsertUnitInFile(eltBackupFile, payload);
+      broadcastServerEvent('elt_records_change', { action: 'upsert', recordId: payload?.id, count: updated.length });
+      return res.json({ success: true, count: updated.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.delete('/api/in-out/elt/:id', (req, res) => {
+    try {
+      const list = getUnitsFile(eltBackupFile).filter(r => r.id !== req.params.id);
+      saveUnitsFile(eltBackupFile, list);
+      broadcastServerEvent('elt_records_change', { action: 'delete', deletedId: req.params.id });
+      return res.json({ success: true });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // In-Out BSR Records endpoints
+  app.get('/api/in-out/bsr', (_req, res) => {
+    res.json({ success: true, records: getUnitsFile(bsrBackupFile) });
+  });
+
+  app.post('/api/in-out/bsr/sync', (req, res) => {
+    try {
+      const payload = req.body;
+      const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+
+      if (Array.isArray(payload)) {
+        if (isReplace) {
+          saveUnitsFile(bsrBackupFile, payload);
+          broadcastServerEvent('bsr_records_change', { action: 'replace', count: payload.length });
+          return res.json({ success: true, count: payload.length });
+        }
+        const list = getUnitsFile(bsrBackupFile);
+        const map = new Map(list.map(r => [r.id, r]));
+        payload.forEach(r => {
+          if (r && r.id) map.set(r.id, { ...(map.get(r.id) || {}), ...r });
+        });
+        const merged = Array.from(map.values());
+        saveUnitsFile(bsrBackupFile, merged);
+        broadcastServerEvent('bsr_records_change', { action: 'sync', count: merged.length });
+        return res.json({ success: true, count: merged.length });
+      }
+      const updated = upsertUnitInFile(bsrBackupFile, payload);
+      broadcastServerEvent('bsr_records_change', { action: 'upsert', recordId: payload?.id, count: updated.length });
+      return res.json({ success: true, count: updated.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.delete('/api/in-out/bsr/:id', (req, res) => {
+    try {
+      const list = getUnitsFile(bsrBackupFile).filter(r => r.id !== req.params.id);
+      saveUnitsFile(bsrBackupFile, list);
+      broadcastServerEvent('bsr_records_change', { action: 'delete', deletedId: req.params.id });
       return res.json({ success: true });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });
@@ -837,6 +1171,10 @@ CRITICAL INSTRUCTIONS:
       }
 
       const totalAffected = protoAffected + ppAffected + fieldAffected;
+      if (protoAffected > 0) broadcastServerEvent('proto_units_change', { action: 'reduce_hours', count: protoAffected });
+      if (ppAffected > 0) broadcastServerEvent('pp_units_change', { action: 'reduce_hours', count: ppAffected });
+      if (fieldAffected > 0) broadcastServerEvent('field_units_change', { action: 'reduce_hours', count: fieldAffected });
+
       return res.json({
         success: true,
         affectedCount: totalAffected,

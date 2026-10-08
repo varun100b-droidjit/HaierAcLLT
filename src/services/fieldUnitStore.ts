@@ -385,8 +385,24 @@ export async function forceSyncFieldUnits(): Promise<FieldUnit[]> {
 
 async function initDataSync() {
   try {
-    // 1. First fetch from local backend server (/api/units/field)
-    // The server is persistent across all browsers & tabs and not blocked by Firestore quota!
+    // 1. Primary Source of Truth: Supabase PostgreSQL
+    try {
+      const remoteData = await fetchFieldUnitsFromSupabase();
+      if (remoteData && remoteData.length > 0) {
+        const cleanRemote = remoteData.filter(u => u && u.id !== 'field-101' && u.id !== 'field-102' && u.id !== 'field-103');
+        const merged = mergeWithLocalCache(cleanRemote);
+        fieldUnitsCache = merged;
+        safeLocalStorageSet(STORAGE_KEY_FIELD_UNITS, merged);
+        idbSaveAll('field_units', merged);
+        notifySubscribers();
+        syncFieldUnitsToServer(merged);
+        return;
+      }
+    } catch (sbErr) {
+      console.warn('Supabase Field fetch notice:', sbErr);
+    }
+
+    // 2. Secondary fallback: Server backend (/api/units/field)
     const serverData = await fetchFieldUnitsFromServer();
     if (serverData && serverData.length > 0) {
       const clean = serverData.filter(u => u && u.id !== 'field-101' && u.id !== 'field-102' && u.id !== 'field-103');
@@ -399,7 +415,7 @@ async function initDataSync() {
       return;
     }
 
-    // 2. Fallback to Firestore
+    // 3. Tertiary fallback: Firestore
     try {
       const firestoreData = await fetchFieldUnitsFromFirestore();
       if (firestoreData && firestoreData.length > 0) {
@@ -412,20 +428,6 @@ async function initDataSync() {
         syncFieldUnitsToServer(merged);
         pushPendingLocalUnitsToFirestore();
         return;
-      }
-    } catch {}
-
-    // 3. Fallback to Supabase
-    try {
-      const remoteData = await fetchFieldUnitsFromSupabase();
-      if (remoteData && remoteData.length > 0) {
-        const cleanRemote = remoteData.filter(u => u && u.id !== 'field-101' && u.id !== 'field-102' && u.id !== 'field-103');
-        const merged = mergeWithLocalCache(cleanRemote);
-        fieldUnitsCache = merged;
-        safeLocalStorageSet(STORAGE_KEY_FIELD_UNITS, merged);
-        idbSaveAll('field_units', merged);
-        notifySubscribers();
-        syncFieldUnitsToServer(merged);
       }
     } catch {}
   } catch (e) {

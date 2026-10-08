@@ -32,6 +32,7 @@ import { ModelSheetManagementCard } from './ModelSheetManagementCard';
 import { PhotoQualityCard } from './PhotoQualityCard';
 import { AutoRefreshSettingsCard } from './AutoRefreshSettingsCard';
 import { LiveUnitHourReductionCard } from './LiveUnitHourReductionCard';
+import { ProtoDataManagementCard } from './ProtoDataManagementCard';
 import { 
   downloadAllMonsterData, 
   purgeAllSupabaseAndFirebaseData, 
@@ -43,12 +44,14 @@ interface SettingsModuleProps {
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
   onOpenSupabaseModal?: () => void;
+  onNavigateToProtoUnits?: () => void;
 }
 
 export const SettingsModule: React.FC<SettingsModuleProps> = ({
   theme,
   onToggleTheme,
-  onOpenSupabaseModal
+  onOpenSupabaseModal,
+  onNavigateToProtoUnits
 }) => {
   // Monster Data Backup & Purge States
   const [isPinModalOpen, setIsPinModalOpen] = useState(false);
@@ -441,6 +444,9 @@ export const SettingsModule: React.FC<SettingsModuleProps> = ({
 
       {/* Live Unit Hours Adjustment (Hour Minus for Proto, PP, Field) */}
       <LiveUnitHourReductionCard />
+
+      {/* Proto Units Data Backup & Restore (Export / Import Live & Finished) */}
+      <ProtoDataManagementCard onNavigateToProtoUnits={onNavigateToProtoUnits} />
 
       {/* Auto-Refresh & Real-Time Sync Settings CardView */}
       <AutoRefreshSettingsCard />
