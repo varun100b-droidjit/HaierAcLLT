@@ -4,9 +4,14 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Modality } from '@google/genai';
+import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const serverSupabaseUrl = process.env.VITE_SUPABASE_URL || 'https://fcmkbyeffrlncrpdrdbb.supabase.co';
+const serverSupabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZjbWtieWVmZnJsbmNycGRyZGJiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU2NDM1NTksImV4cCI6MjEwMTIxOTU1OX0._VY6Bv21Teq553X9ENWlw05MeEC8kz1ubZkGqELpIbA';
+const serverSupabase = createClient(serverSupabaseUrl, serverSupabaseAnonKey);
 
 async function startServer() {
   const app = express();
@@ -586,6 +591,48 @@ CRITICAL INSTRUCTIONS:
   const modelsBackupFile = path.join(smogQtyBackupDir, 'models.json');
   const eltBackupFile = path.join(smogQtyBackupDir, 'elt_records.json');
   const bsrBackupFile = path.join(smogQtyBackupDir, 'bsr_records.json');
+  const eltDeletedBackupFile = path.join(smogQtyBackupDir, 'elt_deleted_ids.json');
+  const bsrDeletedBackupFile = path.join(smogQtyBackupDir, 'bsr_deleted_ids.json');
+
+  const getDeletedIdsFile = (filePath: string): string[] => {
+    try {
+      if (fs.existsSync(filePath)) {
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      }
+    } catch (e) {
+      console.warn(`Could not read deleted ids file ${filePath}:`, e);
+    }
+    return [];
+  };
+
+  const addDeletedIdToFile = (filePath: string, id: string) => {
+    if (!id) return;
+    try {
+      if (!fs.existsSync(smogQtyBackupDir)) {
+        fs.mkdirSync(smogQtyBackupDir, { recursive: true });
+      }
+      const existing = getDeletedIdsFile(filePath);
+      if (!existing.includes(id)) {
+        existing.push(id);
+        fs.writeFileSync(filePath, JSON.stringify(existing, null, 2), 'utf-8');
+      }
+    } catch (e) {
+      console.warn(`Could not write deleted id to file ${filePath}:`, e);
+    }
+  };
+
+  const removeDeletedIdFromFile = (filePath: string, id: string) => {
+    if (!id) return;
+    try {
+      const existing = getDeletedIdsFile(filePath);
+      const filtered = existing.filter(x => x !== id);
+      fs.writeFileSync(filePath, JSON.stringify(filtered, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn(`Could not remove deleted id from file ${filePath}:`, e);
+    }
+  };
 
   const getUnitsFile = (filePath: string): any[] => {
     try {
@@ -937,15 +984,25 @@ CRITICAL INSTRUCTIONS:
     }
   });
 
-  // In-Out ELT Records endpoints
+  // -------------------------------------------------------------
+  // In-Out ELT Records Endpoints (Authoritative Single Source of Truth)
+  // -------------------------------------------------------------
   app.get('/api/in-out/elt', (_req, res) => {
-    res.json({ success: true, records: getUnitsFile(eltBackupFile) });
+    try {
+      const records = getUnitsFile(eltBackupFile);
+      const deletedIds = getDeletedIdsFile(eltDeletedBackupFile);
+      const cleanRecords = records.filter(r => !deletedIds.includes(r.id));
+      res.json({ success: true, records: cleanRecords, deletedIds });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
   });
 
-  app.post('/api/in-out/elt/sync', (req, res) => {
+  app.post('/api/in-out/elt/sync', async (req, res) => {
     try {
       const payload = req.body;
       const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+      const deletedIds = getDeletedIdsFile(eltDeletedBackupFile);
 
       if (Array.isArray(payload)) {
         if (isReplace) {
@@ -956,14 +1013,46 @@ CRITICAL INSTRUCTIONS:
         const list = getUnitsFile(eltBackupFile);
         const map = new Map(list.map(r => [r.id, r]));
         payload.forEach(r => {
-          if (r && r.id) map.set(r.id, { ...(map.get(r.id) || {}), ...r });
+          if (r && r.id) {
+            if (req.query.unmark === 'true' || r.isNew) {
+              removeDeletedIdFromFile(eltDeletedBackupFile, r.id);
+            }
+            if (!deletedIds.includes(r.id) || req.query.unmark === 'true' || r.isNew) {
+              map.set(r.id, { ...(map.get(r.id) || {}), ...r });
+            }
+          }
         });
         const merged = Array.from(map.values());
         saveUnitsFile(eltBackupFile, merged);
         broadcastServerEvent('elt_records_change', { action: 'sync', count: merged.length });
         return res.json({ success: true, count: merged.length });
       }
+
+      if (payload && payload.id) {
+        removeDeletedIdFromFile(eltDeletedBackupFile, payload.id);
+      }
       const updated = upsertUnitInFile(eltBackupFile, payload);
+
+      // Background sync to Supabase if configured
+      if (serverSupabase && payload && payload.id) {
+        try {
+          await serverSupabase.from('elt_records').upsert({
+            id: payload.id,
+            serial_number: payload.serialNumber || '',
+            model_name: payload.modelName || '',
+            in_date: payload.eltDate || '',
+            in_time: payload.eltTime || '',
+            status: payload.status || 'Sent to ELT',
+            operator_name: payload.scannedByName || 'Admin',
+            remarks: payload.materialCode || '',
+            created_at: payload.createdAt || new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          });
+        } catch (sbErr) {
+          console.warn('Server Supabase ELT upsert note:', sbErr);
+        }
+      }
+
       broadcastServerEvent('elt_records_change', { action: 'upsert', recordId: payload?.id, count: updated.length });
       return res.json({ success: true, count: updated.length });
     } catch (e: any) {
@@ -971,26 +1060,58 @@ CRITICAL INSTRUCTIONS:
     }
   });
 
-  app.delete('/api/in-out/elt/:id', (req, res) => {
+  app.delete('/api/in-out/elt/:id', async (req, res) => {
     try {
-      const list = getUnitsFile(eltBackupFile).filter(r => r.id !== req.params.id);
+      const id = req.params.id;
+      if (!id) return res.status(400).json({ success: false, error: 'ID is required' });
+
+      // 1. Mark as deleted in authoritative server tombstone file
+      addDeletedIdToFile(eltDeletedBackupFile, id);
+
+      // 2. Remove from authoritative server file
+      const list = getUnitsFile(eltBackupFile).filter(r => r.id !== id);
       saveUnitsFile(eltBackupFile, list);
-      broadcastServerEvent('elt_records_change', { action: 'delete', deletedId: req.params.id });
-      return res.json({ success: true });
+
+      // 3. Delete from Supabase PostgreSQL if configured
+      let sbDeleted = false;
+      if (serverSupabase) {
+        try {
+          const { error } = await serverSupabase.from('elt_records').delete().eq('id', id);
+          if (!error) sbDeleted = true;
+          else console.warn('Supabase ELT server delete note:', error.message);
+        } catch (sbErr) {
+          console.warn('Supabase ELT server delete note:', sbErr);
+        }
+      }
+
+      // 4. Broadcast DELETE event to ALL active devices (Tablets, PCs, Mobiles)
+      broadcastServerEvent('elt_records_change', { action: 'delete', deletedId: id, timestamp: Date.now() });
+
+      return res.json({ success: true, deletedId: id, supabaseDeleted: sbDeleted });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });
     }
   });
 
-  // In-Out BSR Records endpoints
+  // -------------------------------------------------------------
+  // In-Out BSR Records Endpoints (Authoritative Single Source of Truth)
+  // -------------------------------------------------------------
   app.get('/api/in-out/bsr', (_req, res) => {
-    res.json({ success: true, records: getUnitsFile(bsrBackupFile) });
+    try {
+      const records = getUnitsFile(bsrBackupFile);
+      const deletedIds = getDeletedIdsFile(bsrDeletedBackupFile);
+      const cleanRecords = records.filter(r => !deletedIds.includes(r.id));
+      res.json({ success: true, records: cleanRecords, deletedIds });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
   });
 
-  app.post('/api/in-out/bsr/sync', (req, res) => {
+  app.post('/api/in-out/bsr/sync', async (req, res) => {
     try {
       const payload = req.body;
       const isReplace = req.query.mode === 'replace' || req.headers['x-sync-mode'] === 'replace';
+      const deletedIds = getDeletedIdsFile(bsrDeletedBackupFile);
 
       if (Array.isArray(payload)) {
         if (isReplace) {
@@ -1001,14 +1122,46 @@ CRITICAL INSTRUCTIONS:
         const list = getUnitsFile(bsrBackupFile);
         const map = new Map(list.map(r => [r.id, r]));
         payload.forEach(r => {
-          if (r && r.id) map.set(r.id, { ...(map.get(r.id) || {}), ...r });
+          if (r && r.id) {
+            if (req.query.unmark === 'true' || r.isNew) {
+              removeDeletedIdFromFile(bsrDeletedBackupFile, r.id);
+            }
+            if (!deletedIds.includes(r.id) || req.query.unmark === 'true' || r.isNew) {
+              map.set(r.id, { ...(map.get(r.id) || {}), ...r });
+            }
+          }
         });
         const merged = Array.from(map.values());
         saveUnitsFile(bsrBackupFile, merged);
         broadcastServerEvent('bsr_records_change', { action: 'sync', count: merged.length });
         return res.json({ success: true, count: merged.length });
       }
+
+      if (payload && payload.id) {
+        removeDeletedIdFromFile(bsrDeletedBackupFile, payload.id);
+      }
       const updated = upsertUnitInFile(bsrBackupFile, payload);
+
+      // Background sync to Supabase if configured
+      if (serverSupabase && payload && payload.id) {
+        try {
+          await serverSupabase.from('bsr_records').upsert({
+            id: payload.id,
+            serial_number: payload.serialNumber || '',
+            model_name: payload.modelName || '',
+            in_date: payload.originalELTDateTime || '',
+            out_date: payload.bsrReturnDateTime || '',
+            status: payload.status || 'Returned from BSR',
+            operator_name: payload.returnedByName || 'Admin',
+            remarks: payload.materialCode || '',
+            created_at: payload.createdAt || new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          });
+        } catch (sbErr) {
+          console.warn('Server Supabase BSR upsert note:', sbErr);
+        }
+      }
+
       broadcastServerEvent('bsr_records_change', { action: 'upsert', recordId: payload?.id, count: updated.length });
       return res.json({ success: true, count: updated.length });
     } catch (e: any) {
@@ -1016,14 +1169,114 @@ CRITICAL INSTRUCTIONS:
     }
   });
 
-  app.delete('/api/in-out/bsr/:id', (req, res) => {
+  app.delete('/api/in-out/bsr/:id', async (req, res) => {
     try {
-      const list = getUnitsFile(bsrBackupFile).filter(r => r.id !== req.params.id);
+      const id = req.params.id;
+      if (!id) return res.status(400).json({ success: false, error: 'ID is required' });
+
+      // 1. Mark as deleted in authoritative server tombstone file
+      addDeletedIdToFile(bsrDeletedBackupFile, id);
+
+      // 2. Remove from authoritative server file
+      const list = getUnitsFile(bsrBackupFile).filter(r => r.id !== id);
       saveUnitsFile(bsrBackupFile, list);
-      broadcastServerEvent('bsr_records_change', { action: 'delete', deletedId: req.params.id });
-      return res.json({ success: true });
+
+      // 3. Delete from Supabase PostgreSQL if configured
+      let sbDeleted = false;
+      if (serverSupabase) {
+        try {
+          const { error } = await serverSupabase.from('bsr_records').delete().eq('id', id);
+          if (!error) sbDeleted = true;
+          else console.warn('Supabase BSR server delete note:', error.message);
+        } catch (sbErr) {
+          console.warn('Supabase BSR server delete note:', sbErr);
+        }
+      }
+
+      // 4. Broadcast DELETE event to ALL active devices
+      broadcastServerEvent('bsr_records_change', { action: 'delete', deletedId: id, timestamp: Date.now() });
+
+      return res.json({ success: true, deletedId: id, supabaseDeleted: sbDeleted });
     } catch (e: any) {
       return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // -------------------------------------------------------------
+  // Atomic ELT to BSR Transfer Endpoint
+  // -------------------------------------------------------------
+  app.post('/api/in-out/transfer-to-bsr', async (req, res) => {
+    try {
+      const { bsrRecords = [], deletedEltIds = [] } = req.body;
+      if (!Array.isArray(bsrRecords) || !Array.isArray(deletedEltIds)) {
+        return res.status(400).json({ success: false, error: 'Invalid payload structure' });
+      }
+
+      // 1. Process ELT Deletions
+      let eltList = getUnitsFile(eltBackupFile);
+      const eltDeleteSet = new Set(deletedEltIds);
+      eltList = eltList.filter(r => !eltDeleteSet.has(r.id));
+      saveUnitsFile(eltBackupFile, eltList);
+      deletedEltIds.forEach(id => addDeletedIdToFile(eltDeletedBackupFile, id));
+
+      // 2. Process BSR Insertions
+      let bsrList = getUnitsFile(bsrBackupFile);
+      const bsrMap = new Map(bsrList.map(r => [r.id, r]));
+      bsrRecords.forEach(r => {
+        if (r && r.id) {
+          removeDeletedIdFromFile(bsrDeletedBackupFile, r.id);
+          bsrMap.set(r.id, r);
+        }
+      });
+      const newBsrList = Array.from(bsrMap.values());
+      saveUnitsFile(bsrBackupFile, newBsrList);
+
+      // 3. Supabase sync
+      if (serverSupabase) {
+        try {
+          for (const id of deletedEltIds) {
+            await serverSupabase.from('elt_records').delete().eq('id', id);
+          }
+          for (const rec of bsrRecords) {
+            await serverSupabase.from('bsr_records').upsert({
+              id: rec.id,
+              serial_number: rec.serialNumber || '',
+              model_name: rec.modelName || '',
+              in_date: rec.originalELTDateTime || '',
+              out_date: rec.bsrReturnDateTime || '',
+              status: rec.status || 'Returned from BSR',
+              operator_name: rec.returnedByName || 'Admin',
+              remarks: rec.materialCode || '',
+              created_at: rec.createdAt || new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            });
+          }
+        } catch (sbErr) {
+          console.warn('Server Supabase transfer note:', sbErr);
+        }
+      }
+
+      // 4. Broadcast events via SSE to ALL connected devices
+      deletedEltIds.forEach(id => {
+        broadcastServerEvent('elt_records_change', { action: 'delete', deletedId: id, transfer: true });
+      });
+      broadcastServerEvent('bsr_records_change', { action: 'transfer', count: bsrRecords.length });
+
+      return res.json({ success: true, transferredCount: bsrRecords.length });
+    } catch (e: any) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  // Client-triggered SSE Broadcast route
+  app.post('/api/events/broadcast', (req, res) => {
+    try {
+      const { type, data } = req.body;
+      if (!type) return res.status(400).json({ error: 'type is required' });
+      broadcastServerEvent(type, data);
+      return res.json({ success: true });
+    } catch (e: any) {
+      return res.status(500).json({ error: e.message });
     }
   });
 

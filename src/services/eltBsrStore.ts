@@ -1,5 +1,14 @@
 import { db, isFirebaseConfigured, collection, doc, setDoc, deleteDoc, getDocs, onSnapshot } from './firebase';
-import { broadcastLabRealtimeEvent, subscribeToLabRealtimeEvents } from '../lib/supabase';
+import { 
+  broadcastLabRealtimeEvent, 
+  subscribeToLabRealtimeEvents,
+  fetchELTRecordsFromSupabase,
+  syncELTRecordToSupabase,
+  deleteELTRecordFromSupabase,
+  fetchBSRRecordsFromSupabase,
+  syncBSRRecordToSupabase,
+  deleteBSRRecordFromSupabase
+} from '../lib/supabase';
 
 export interface ELTRecord {
   id: string; // recordId
@@ -35,6 +44,67 @@ export interface BSRRecord {
 
 const STORAGE_KEY_ELT_RECORDS = 'llt_elt_records_v1';
 const STORAGE_KEY_BSR_RECORDS = 'llt_bsr_records_v1';
+const DELETED_ELT_KEY = 'llt_deleted_elt_records_v1';
+const DELETED_BSR_KEY = 'llt_deleted_bsr_records_v1';
+
+// Tombstone Management to prevent resurrection of deleted In/Out records
+export function getDeletedELTIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(DELETED_ELT_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export function markELTDeleted(id: string): void {
+  if (!id) return;
+  const set = getDeletedELTIds();
+  set.add(id);
+  try {
+    localStorage.setItem(DELETED_ELT_KEY, JSON.stringify(Array.from(set)));
+  } catch {}
+}
+
+export function unmarkELTDeleted(id: string): void {
+  if (!id) return;
+  const set = getDeletedELTIds();
+  if (set.has(id)) {
+    set.delete(id);
+    try {
+      localStorage.setItem(DELETED_ELT_KEY, JSON.stringify(Array.from(set)));
+    } catch {}
+  }
+}
+
+export function getDeletedBSRIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(DELETED_BSR_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export function markBSRDeleted(id: string): void {
+  if (!id) return;
+  const set = getDeletedBSRIds();
+  set.add(id);
+  try {
+    localStorage.setItem(DELETED_BSR_KEY, JSON.stringify(Array.from(set)));
+  } catch {}
+}
+
+export function unmarkBSRDeleted(id: string): void {
+  if (!id) return;
+  const set = getDeletedBSRIds();
+  if (set.has(id)) {
+    set.delete(id);
+    try {
+      localStorage.setItem(DELETED_BSR_KEY, JSON.stringify(Array.from(set)));
+    } catch {}
+  }
+}
 
 // Initial Demo Seed Records so tables have live data immediately
 const INITIAL_ELT_RECORDS: ELTRecord[] = [
@@ -88,30 +158,36 @@ const INITIAL_BSR_RECORDS: BSRRecord[] = [
 ];
 
 function loadLocalELT(): ELTRecord[] {
+  const deletedSet = getDeletedELTIds();
   try {
     const raw = localStorage.getItem(STORAGE_KEY_ELT_RECORDS);
     if (!raw) {
-      localStorage.setItem(STORAGE_KEY_ELT_RECORDS, JSON.stringify(INITIAL_ELT_RECORDS));
-      return INITIAL_ELT_RECORDS;
+      const filteredInitial = INITIAL_ELT_RECORDS.filter(r => !deletedSet.has(r.id));
+      localStorage.setItem(STORAGE_KEY_ELT_RECORDS, JSON.stringify(filteredInitial));
+      return filteredInitial;
     }
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : INITIAL_ELT_RECORDS;
+    const list = Array.isArray(parsed) ? parsed : INITIAL_ELT_RECORDS;
+    return list.filter(r => !deletedSet.has(r.id));
   } catch {
-    return INITIAL_ELT_RECORDS;
+    return INITIAL_ELT_RECORDS.filter(r => !deletedSet.has(r.id));
   }
 }
 
 function loadLocalBSR(): BSRRecord[] {
+  const deletedSet = getDeletedBSRIds();
   try {
     const raw = localStorage.getItem(STORAGE_KEY_BSR_RECORDS);
     if (!raw) {
-      localStorage.setItem(STORAGE_KEY_BSR_RECORDS, JSON.stringify(INITIAL_BSR_RECORDS));
-      return INITIAL_BSR_RECORDS;
+      const filteredInitial = INITIAL_BSR_RECORDS.filter(r => !deletedSet.has(r.id));
+      localStorage.setItem(STORAGE_KEY_BSR_RECORDS, JSON.stringify(filteredInitial));
+      return filteredInitial;
     }
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : INITIAL_BSR_RECORDS;
+    const list = Array.isArray(parsed) ? parsed : INITIAL_BSR_RECORDS;
+    return list.filter(r => !deletedSet.has(r.id));
   } catch {
-    return INITIAL_BSR_RECORDS;
+    return INITIAL_BSR_RECORDS.filter(r => !deletedSet.has(r.id));
   }
 }
 
@@ -135,7 +211,7 @@ function notifyBSRListeners(records: BSRRecord[]) {
   });
 }
 
-function saveLocalELT(records: ELTRecord[]) {
+function saveLocalELT(records: ELTRecord[], shouldBroadcast: boolean = true) {
   try {
     localStorage.setItem(STORAGE_KEY_ELT_RECORDS, JSON.stringify(records));
   } catch (e) {
@@ -144,10 +220,12 @@ function saveLocalELT(records: ELTRecord[]) {
   if (localELTBus) {
     try { localELTBus.postMessage({ type: 'elt_change', timestamp: Date.now() }); } catch {}
   }
-  broadcastLabRealtimeEvent('elt_records_change', { timestamp: Date.now() });
+  if (shouldBroadcast) {
+    broadcastLabRealtimeEvent('elt_records_change', { timestamp: Date.now() });
+  }
 }
 
-function saveLocalBSR(records: BSRRecord[]) {
+function saveLocalBSR(records: BSRRecord[], shouldBroadcast: boolean = true) {
   try {
     localStorage.setItem(STORAGE_KEY_BSR_RECORDS, JSON.stringify(records));
   } catch (e) {
@@ -156,10 +234,12 @@ function saveLocalBSR(records: BSRRecord[]) {
   if (localELTBus) {
     try { localELTBus.postMessage({ type: 'bsr_change', timestamp: Date.now() }); } catch {}
   }
-  broadcastLabRealtimeEvent('bsr_records_change', { timestamp: Date.now() });
+  if (shouldBroadcast) {
+    broadcastLabRealtimeEvent('bsr_records_change', { timestamp: Date.now() });
+  }
 }
 
-// Local Inter-Tab Broadcast Channel
+// Inter-Tab Broadcast Channel
 const localELTBus = typeof window !== 'undefined' && 'BroadcastChannel' in window 
   ? new BroadcastChannel('llt_elt_bsr_bus') 
   : null;
@@ -167,121 +247,337 @@ const localELTBus = typeof window !== 'undefined' && 'BroadcastChannel' in windo
 if (localELTBus) {
   localELTBus.onmessage = (ev) => {
     if (ev.data?.type === 'elt_change') {
-      eltCache = loadLocalELT();
-      notifyELTListeners(eltCache);
+      if (ev.data?.deletedId) {
+        markELTDeleted(ev.data.deletedId);
+        eltCache = eltCache.filter(r => r.id !== ev.data.deletedId);
+        notifyELTListeners(eltCache);
+      } else {
+        eltCache = loadLocalELT();
+        notifyELTListeners(eltCache);
+      }
     } else if (ev.data?.type === 'bsr_change') {
-      bsrCache = loadLocalBSR();
-      notifyBSRListeners(bsrCache);
+      if (ev.data?.deletedId) {
+        markBSRDeleted(ev.data.deletedId);
+        bsrCache = bsrCache.filter(r => r.id !== ev.data.deletedId);
+        notifyBSRListeners(bsrCache);
+      } else {
+        bsrCache = loadLocalBSR();
+        notifyBSRListeners(bsrCache);
+      }
     }
   };
 }
 
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (e) => {
-    if (e.key === STORAGE_KEY_ELT_RECORDS) {
+    if (e.key === STORAGE_KEY_ELT_RECORDS || e.key === DELETED_ELT_KEY) {
       eltCache = loadLocalELT();
       notifyELTListeners(eltCache);
     }
-    if (e.key === STORAGE_KEY_BSR_RECORDS) {
+    if (e.key === STORAGE_KEY_BSR_RECORDS || e.key === DELETED_BSR_KEY) {
       bsrCache = loadLocalBSR();
       notifyBSRListeners(bsrCache);
     }
   });
 }
 
-// Global Supabase Realtime event listeners
-subscribeToLabRealtimeEvents((event) => {
-  if (event === 'elt_records_change' || event === 'bsr_records_change') {
+// Node.js Server Sync Helpers
+async function syncELTRecordToServer(record: ELTRecord): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await fetch('/api/in-out/elt/sync?unmark=true', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(record)
+    });
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      return { success: false, error: errJson.error || `Server responded with ${res.status}` };
+    }
+    const data = await res.json().catch(() => ({ success: true }));
+    return { success: data.success !== false, error: data.error };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Server connection failed' };
+  }
+}
+
+async function deleteELTRecordFromServer(id: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await fetch(`/api/in-out/elt/${encodeURIComponent(id)}`, {
+      method: 'DELETE'
+    });
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      return { success: false, error: errJson.error || `Server responded with ${res.status}` };
+    }
+    const data = await res.json().catch(() => ({ success: true }));
+    return { success: data.success !== false, error: data.error };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Server request failed' };
+  }
+}
+
+async function fetchELTRecordsFromServer(): Promise<{ records: ELTRecord[]; deletedIds?: string[] } | null> {
+  try {
+    const res = await fetch('/api/in-out/elt');
+    if (!res.ok) return null;
+    const json = await res.json();
+    return {
+      records: Array.isArray(json.records) ? json.records : [],
+      deletedIds: Array.isArray(json.deletedIds) ? json.deletedIds : []
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function syncBSRRecordToServer(record: BSRRecord): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await fetch('/api/in-out/bsr/sync?unmark=true', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(record)
+    });
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      return { success: false, error: errJson.error || `Server responded with ${res.status}` };
+    }
+    const data = await res.json().catch(() => ({ success: true }));
+    return { success: data.success !== false, error: data.error };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Server connection failed' };
+  }
+}
+
+async function deleteBSRRecordFromServer(id: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    const res = await fetch(`/api/in-out/bsr/${encodeURIComponent(id)}`, {
+      method: 'DELETE'
+    });
+    if (!res.ok) {
+      const errJson = await res.json().catch(() => ({}));
+      return { success: false, error: errJson.error || `Server responded with ${res.status}` };
+    }
+    const data = await res.json().catch(() => ({ success: true }));
+    return { success: data.success !== false, error: data.error };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'Server request failed' };
+  }
+}
+
+async function fetchBSRRecordsFromServer(): Promise<{ records: BSRRecord[]; deletedIds?: string[] } | null> {
+  try {
+    const res = await fetch('/api/in-out/bsr');
+    if (!res.ok) return null;
+    const json = await res.json();
+    return {
+      records: Array.isArray(json.records) ? json.records : [],
+      deletedIds: Array.isArray(json.deletedIds) ? json.deletedIds : []
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Debounced synchronization trigger to prevent redundant reload loops
+let debounceSyncTimer: any = null;
+function debouncedInitSync() {
+  if (debounceSyncTimer) clearTimeout(debounceSyncTimer);
+  debounceSyncTimer = setTimeout(() => {
     initCloudAndLocalELTBSR();
+  }, 250);
+}
+
+// Global Realtime event listeners: Handles Supabase postgres_changes, Supabase Broadcast, and Server SSE events across all devices
+subscribeToLabRealtimeEvents((event, payload) => {
+  if (event === 'elt_records_change') {
+    const deletedId = payload?.deletedId 
+      || (payload?.action === 'delete' ? (payload?.recordId || payload?.id) : null)
+      || (payload?.eventType === 'DELETE' ? (payload?.recordId || payload?.row?.id || payload?.old?.id) : null);
+    
+    if (deletedId) {
+      console.log('[ELT Realtime DELETE Event Received]:', deletedId);
+      markELTDeleted(deletedId);
+      eltCache = eltCache.filter(r => r.id !== deletedId);
+      saveLocalELT(eltCache, false);
+      notifyELTListeners(eltCache);
+    } else if (Array.isArray(payload?.deletedIds)) {
+      payload.deletedIds.forEach((id: string) => markELTDeleted(id));
+      const deletedSet = getDeletedELTIds();
+      eltCache = eltCache.filter(r => !deletedSet.has(r.id));
+      saveLocalELT(eltCache, false);
+      notifyELTListeners(eltCache);
+    } else {
+      debouncedInitSync();
+    }
+  } else if (event === 'bsr_records_change') {
+    const deletedId = payload?.deletedId 
+      || (payload?.action === 'delete' ? (payload?.recordId || payload?.id) : null)
+      || (payload?.eventType === 'DELETE' ? (payload?.recordId || payload?.row?.id || payload?.old?.id) : null);
+    
+    if (deletedId) {
+      console.log('[BSR Realtime DELETE Event Received]:', deletedId);
+      markBSRDeleted(deletedId);
+      bsrCache = bsrCache.filter(r => r.id !== deletedId);
+      saveLocalBSR(bsrCache, false);
+      notifyBSRListeners(bsrCache);
+    } else if (Array.isArray(payload?.deletedIds)) {
+      payload.deletedIds.forEach((id: string) => markBSRDeleted(id));
+      const deletedSet = getDeletedBSRIds();
+      bsrCache = bsrCache.filter(r => !deletedSet.has(r.id));
+      saveLocalBSR(bsrCache, false);
+      notifyBSRListeners(bsrCache);
+    } else {
+      debouncedInitSync();
+    }
   }
 });
 
 /* =========================================================================
-   FIRESTORE REAL-TIME LISTENERS
+   AUTHORITATIVE SERVER & DATABASE INITIALIZATION & RECONCILIATION
    ========================================================================= */
 
 let isFirestoreAttached = false;
+let isSyncingNow = false;
 
-export function initCloudAndLocalELTBSR() {
-  if (typeof window === 'undefined') return;
+export async function initCloudAndLocalELTBSR() {
+  if (typeof window === 'undefined' || isSyncingNow) return;
+  isSyncingNow = true;
 
-  if (isFirebaseConfigured && db && !isFirestoreAttached) {
-    try {
-      // 1. ELT Records Live Listener
-      const eltCol = collection(db, 'elt_records');
-      onSnapshot(eltCol, (snap) => {
-        if (!snap.empty) {
-          const list: ELTRecord[] = [];
-          snap.forEach(d => {
-            const data = d.data() as ELTRecord;
-            list.push({
-              ...data,
-              id: d.id || data.id,
-              serialNumber: (data.serialNumber || '').trim().toUpperCase(),
-              modelName: (data.modelName || '').trim()
-            });
-          });
-          eltCache = list;
-          saveLocalELT(list);
-          notifyELTListeners(list);
-        }
-      }, (err) => {
-        console.warn('elt_records onSnapshot notice:', err);
-      });
+  try {
+    // 1. Fetch Authoritative Data from Node.js Server first
+    const [serverELTRes, serverBSRRes] = await Promise.all([
+      fetchELTRecordsFromServer(),
+      fetchBSRRecordsFromServer()
+    ]);
 
-      // 2. BSR Records Live Listener
-      const bsrCol = collection(db, 'bsr_records');
-      onSnapshot(bsrCol, (snap) => {
-        if (!snap.empty) {
-          const list: BSRRecord[] = [];
-          snap.forEach(d => {
-            const data = d.data() as BSRRecord;
-            list.push({
-              ...data,
-              id: d.id || data.id,
-              serialNumber: (data.serialNumber || '').trim().toUpperCase(),
-              modelName: (data.modelName || '').trim()
-            });
-          });
-          bsrCache = list;
-          saveLocalBSR(list);
-          notifyBSRListeners(list);
-        }
-      }, (err) => {
-        console.warn('bsr_records onSnapshot notice:', err);
-      });
-
-      isFirestoreAttached = true;
-    } catch (e) {
-      console.warn('Error setting up ELT/BSR Firestore listener:', e);
+    if (serverELTRes) {
+      if (serverELTRes.deletedIds && serverELTRes.deletedIds.length > 0) {
+        serverELTRes.deletedIds.forEach(id => markELTDeleted(id));
+      }
+      const currentDeletedELT = getDeletedELTIds();
+      const cleanServerELT = (serverELTRes.records || []).filter(r => !currentDeletedELT.has(r.id));
+      eltCache = cleanServerELT;
+      saveLocalELT(cleanServerELT, false);
+      notifyELTListeners(cleanServerELT);
     }
-  }
 
-  // Periodic fallback check
-  if (isFirebaseConfigured && db) {
-    getDocs(collection(db, 'elt_records')).then(snap => {
-      if (!snap.empty) {
-        const list: ELTRecord[] = [];
-        snap.forEach(d => list.push({ ...(d.data() as ELTRecord), id: d.id }));
-        eltCache = list;
-        saveLocalELT(list);
-        notifyELTListeners(list);
+    if (serverBSRRes) {
+      if (serverBSRRes.deletedIds && serverBSRRes.deletedIds.length > 0) {
+        serverBSRRes.deletedIds.forEach(id => markBSRDeleted(id));
       }
-    }).catch(() => {});
+      const currentDeletedBSR = getDeletedBSRIds();
+      const cleanServerBSR = (serverBSRRes.records || []).filter(r => !currentDeletedBSR.has(r.id));
+      bsrCache = cleanServerBSR;
+      saveLocalBSR(cleanServerBSR, false);
+      notifyBSRListeners(cleanServerBSR);
+    }
 
-    getDocs(collection(db, 'bsr_records')).then(snap => {
-      if (!snap.empty) {
-        const list: BSRRecord[] = [];
-        snap.forEach(d => list.push({ ...(d.data() as BSRRecord), id: d.id }));
-        bsrCache = list;
-        saveLocalBSR(list);
-        notifyBSRListeners(list);
+    // 2. Fetch Authoritative Data from Supabase PostgreSQL if table exists
+    try {
+      const [eltFromSb, bsrFromSb] = await Promise.all([
+        fetchELTRecordsFromSupabase(),
+        fetchBSRRecordsFromSupabase()
+      ]);
+
+      if (eltFromSb !== null) {
+        const currentDeleted = getDeletedELTIds();
+        const clean = eltFromSb.filter(r => !currentDeleted.has(r.id));
+        eltCache = clean;
+        saveLocalELT(clean, false);
+        notifyELTListeners(clean);
       }
-    }).catch(() => {});
+      if (bsrFromSb !== null) {
+        const currentDeleted = getDeletedBSRIds();
+        const clean = bsrFromSb.filter(r => !currentDeleted.has(r.id));
+        bsrCache = clean;
+        saveLocalBSR(clean, false);
+        notifyBSRListeners(clean);
+      }
+    } catch (sbErr) {
+      console.warn('[ELTBSR] Supabase sync notice:', sbErr);
+    }
+
+    // 3. Firestore Live Listener and Fallback
+    if (isFirebaseConfigured && db && !isFirestoreAttached) {
+      try {
+        const eltCol = collection(db, 'elt_records');
+        onSnapshot(eltCol, (snap) => {
+          const list: ELTRecord[] = [];
+          if (!snap.empty) {
+            snap.forEach(d => {
+              const data = d.data() as ELTRecord;
+              const docId = d.id || data.id;
+              if (!getDeletedELTIds().has(docId)) {
+                list.push({
+                  ...data,
+                  id: docId,
+                  serialNumber: (data.serialNumber || '').trim().toUpperCase(),
+                  modelName: (data.modelName || '').trim()
+                });
+              }
+            });
+          }
+          eltCache = list;
+          saveLocalELT(list, false);
+          notifyELTListeners(list);
+        }, (err) => {
+          console.warn('elt_records onSnapshot notice:', err);
+        });
+
+        const bsrCol = collection(db, 'bsr_records');
+        onSnapshot(bsrCol, (snap) => {
+          const list: BSRRecord[] = [];
+          if (!snap.empty) {
+            snap.forEach(d => {
+              const data = d.data() as BSRRecord;
+              const docId = d.id || data.id;
+              if (!getDeletedBSRIds().has(docId)) {
+                list.push({
+                  ...data,
+                  id: docId,
+                  serialNumber: (data.serialNumber || '').trim().toUpperCase(),
+                  modelName: (data.modelName || '').trim()
+                });
+              }
+            });
+          }
+          bsrCache = list;
+          saveLocalBSR(list, false);
+          notifyBSRListeners(list);
+        }, (err) => {
+          console.warn('bsr_records onSnapshot notice:', err);
+        });
+
+        isFirestoreAttached = true;
+      } catch (e) {
+        console.warn('Error setting up ELT/BSR Firestore listener:', e);
+      }
+    }
+  } catch (err) {
+    console.warn('[ELTBSR] initCloudAndLocalELTBSR error:', err);
+  } finally {
+    isSyncingNow = false;
   }
 }
 
-// Run initial check
+// Periodic background synchronization every 4 seconds to guarantee multi-device alignment
+if (typeof window !== 'undefined') {
+  setInterval(() => {
+    initCloudAndLocalELTBSR();
+  }, 4000);
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      initCloudAndLocalELTBSR();
+    }
+  });
+
+  window.addEventListener('online', () => {
+    initCloudAndLocalELTBSR();
+  });
+}
+
+// Initial load check
 initCloudAndLocalELTBSR();
 
 /* =========================================================================
@@ -364,12 +660,45 @@ export async function sendMachinesToELT(
     return { success: false, addedCount: 0, duplicates };
   }
 
-  // 1. Update local cache
+  // 1. Unmark any previous deletion tombstones for these newly added records
+  for (const rec of newRecords) {
+    unmarkELTDeleted(rec.id);
+  }
+
+  // 2. Update local cache
   const updatedELT = [...newRecords, ...eltCache];
-  saveLocalELT(updatedELT);
+  saveLocalELT(updatedELT, true);
   notifyELTListeners(updatedELT);
 
-  // 2. Persist to Firestore
+  // 3. Persist to Authoritative Server & Supabase
+  let savedServerCount = 0;
+  let serverErrorMessage = '';
+  for (const rec of newRecords) {
+    const srvRes = await syncELTRecordToServer(rec);
+    if (srvRes.success) {
+      savedServerCount++;
+    } else {
+      serverErrorMessage = srvRes.error || 'Server save failed';
+    }
+    syncELTRecordToSupabase(rec).catch(e => console.warn('[ELT] Supabase sync note:', e));
+  }
+
+  // If server save failed completely, rollback local cache and report error
+  if (savedServerCount === 0 && newRecords.length > 0) {
+    console.error('[sendMachinesToELT] Authoritative server save failed:', serverErrorMessage);
+    const rolledBack = eltCache.filter(r => !newRecords.some(nr => nr.id === r.id));
+    eltCache = rolledBack;
+    saveLocalELT(rolledBack, false);
+    notifyELTListeners(rolledBack);
+    return {
+      success: false,
+      addedCount: 0,
+      duplicates,
+      error: serverErrorMessage || 'Failed to persist record to authoritative server'
+    } as any;
+  }
+
+  // 4. Persist to Firestore if configured
   if (isFirebaseConfigured && db) {
     for (const rec of newRecords) {
       try {
@@ -380,7 +709,14 @@ export async function sendMachinesToELT(
     }
   }
 
-  return { success: true, addedCount: newRecords.length, duplicates };
+  // 5. Broadcast addition to all connected devices
+  broadcastLabRealtimeEvent('elt_records_change', {
+    action: 'add_machines',
+    count: savedServerCount,
+    timestamp: Date.now()
+  });
+
+  return { success: true, addedCount: savedServerCount, duplicates };
 }
 
 /**
@@ -390,7 +726,7 @@ export async function sendMachinesToELT(
  * 3. Saves to BSR Record with:
  *    - Model Name, Material Code / Model Prefix, Serial Number
  *    - Process Type: "BSR Return", Status: "Returned from BSR"
- *    - Original ELT Date & Time, BSR Return Date & Time, Firebase Timestamp
+ *    - Original ELT Date & Time, BSR Return Date & Time, Timestamp
  */
 export async function returnMachineToBSR(
   serialNumber: string,
@@ -435,22 +771,54 @@ export async function returnMachineToBSR(
     timestamp
   };
 
-  // 1. Remove from ELT Cache
+  // 1. Mark matchingELT.id as deleted from ELT and unmark BSR tombstone
+  markELTDeleted(matchingELT.id);
+  unmarkBSRDeleted(bsrDocId);
+
+  // 2. Remove from ELT Cache
   const updatedELT = eltCache.filter(r => r.serialNumber.trim().toUpperCase() !== cleanSerial);
-  saveLocalELT(updatedELT);
+  saveLocalELT(updatedELT, false);
   notifyELTListeners(updatedELT);
 
-  // 2. Add to BSR Cache
+  // 3. Add to BSR Cache
   const updatedBSR = [bsrRecord, ...bsrCache.filter(r => r.serialNumber.trim().toUpperCase() !== cleanSerial)];
-  saveLocalBSR(updatedBSR);
+  saveLocalBSR(updatedBSR, false);
   notifyBSRListeners(updatedBSR);
 
-  // 3. Atomically sync to Firestore (Delete from elt_records, Write to bsr_records)
+  // 4. Broadcast Realtime events across all devices
+  broadcastLabRealtimeEvent('elt_records_change', {
+    deletedId: matchingELT.id,
+    action: 'transfer_to_bsr',
+    timestamp: Date.now()
+  });
+  broadcastLabRealtimeEvent('bsr_records_change', {
+    recordId: bsrDocId,
+    action: 'return_from_elt',
+    timestamp: Date.now()
+  });
+
+  // 5. Node.js Server Atomic Transfer
+  try {
+    await fetch('/api/in-out/transfer-to-bsr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bsrRecords: [bsrRecord],
+        deletedEltIds: [matchingELT.id]
+      })
+    });
+  } catch (e) {
+    console.warn('[BSR] Server atomic transfer note:', e);
+  }
+
+  // 6. Supabase sync
+  deleteELTRecordFromSupabase(matchingELT.id).catch(e => console.warn('[ELT] Supabase delete note:', e));
+  syncBSRRecordToSupabase(bsrRecord).catch(e => console.warn('[BSR] Supabase sync note:', e));
+
+  // 7. Atomically sync to Firestore
   if (isFirebaseConfigured && db) {
     try {
-      // Write BSR first so data is never lost
       await setDoc(doc(db, 'bsr_records', bsrDocId), bsrRecord, { merge: true });
-      // Then remove from ELT
       await deleteDoc(doc(db, 'elt_records', matchingELT.id));
     } catch (e) {
       console.warn('Failed to execute BSR transfer in Firestore:', e);
@@ -494,9 +862,11 @@ export async function returnMultipleMachinesToBSR(
 
     cleanedSerials.push(cleanSerial);
     deletedELTIds.push(matchingELT.id);
+    markELTDeleted(matchingELT.id);
 
     const originalELTDateTime = `${matchingELT.eltDate} ${matchingELT.eltTime}`;
     const bsrDocId = `BSR-${cleanSerial.replace(/[^A-Z0-9_-]/gi, '_')}`;
+    unmarkBSRDeleted(bsrDocId);
 
     const bsrRecord: BSRRecord = {
       id: bsrDocId,
@@ -524,7 +894,7 @@ export async function returnMultipleMachinesToBSR(
 
   // 1. Remove from ELT Cache
   const updatedELT = eltCache.filter(r => !cleanedSerials.includes(r.serialNumber.trim().toUpperCase()));
-  saveLocalELT(updatedELT);
+  saveLocalELT(updatedELT, false);
   notifyELTListeners(updatedELT);
 
   // 2. Add to BSR Cache
@@ -532,10 +902,43 @@ export async function returnMultipleMachinesToBSR(
     ...newBSRRecords,
     ...bsrCache.filter(r => !cleanedSerials.includes(r.serialNumber.trim().toUpperCase()))
   ];
-  saveLocalBSR(updatedBSR);
+  saveLocalBSR(updatedBSR, false);
   notifyBSRListeners(updatedBSR);
 
-  // 3. Atomically sync to Firestore
+  // 3. Node.js Server Atomic Transfer
+  try {
+    await fetch('/api/in-out/transfer-to-bsr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bsrRecords: newBSRRecords,
+        deletedEltIds: deletedELTIds
+      })
+    });
+  } catch (e) {
+    console.warn('[BSR] Batch transfer server note:', e);
+  }
+
+  // 4. Realtime Broadcast & Supabase sync
+  for (const eltId of deletedELTIds) {
+    broadcastLabRealtimeEvent('elt_records_change', {
+      deletedId: eltId,
+      action: 'transfer_to_bsr',
+      timestamp: Date.now()
+    });
+    deleteELTRecordFromSupabase(eltId).catch(e => console.warn(e));
+  }
+
+  for (const bsrRec of newBSRRecords) {
+    syncBSRRecordToSupabase(bsrRec).catch(e => console.warn(e));
+  }
+  broadcastLabRealtimeEvent('bsr_records_change', {
+    action: 'batch_transfer',
+    count: newBSRRecords.length,
+    timestamp: Date.now()
+  });
+
+  // 4. Atomically sync to Firestore
   if (isFirebaseConfigured && db) {
     for (const bsrRec of newBSRRecords) {
       try {
@@ -558,37 +961,137 @@ export async function returnMultipleMachinesToBSR(
 }
 
 /**
- * Delete a single ELT record manually
+ * Delete a single ELT record manually.
+ * Calls and awaits Supabase PostgreSQL, Node.js server, and Firestore deletions.
+ * Rolls back local state and returns failure if the authoritative deletion fails.
  */
-export async function deleteELTRecord(recordId: string): Promise<void> {
+export async function deleteELTRecord(recordId: string): Promise<{ success: boolean; error?: string }> {
+  if (!recordId) return { success: false, error: 'No record ID specified' };
+
+  const backupCache = [...eltCache];
+
+  // 1. Tentatively mark as deleted in tombstone set
+  markELTDeleted(recordId);
+
+  // 2. Remove immediately from local memory cache & localStorage
   const updated = eltCache.filter(r => r.id !== recordId);
-  saveLocalELT(updated);
+  saveLocalELT(updated, false);
   notifyELTListeners(updated);
 
+  // 3. Call and await Supabase PostgreSQL delete
+  const sbResult = await deleteELTRecordFromSupabase(recordId);
+
+  // 4. Call and await Node.js Server delete
+  const serverResult = await deleteELTRecordFromServer(recordId);
+
+  // 5. Call and await Firestore delete if configured
   if (isFirebaseConfigured && db) {
     try {
       await deleteDoc(doc(db, 'elt_records', recordId));
-    } catch (e) {
-      console.warn(e);
+    } catch (e: any) {
+      console.warn('[ELTStore] Firestore delete error:', e);
     }
   }
+
+  // 6. Evaluate authoritative deletion outcome
+  const isAuthoritativeSuccess = sbResult.success || serverResult.success;
+
+  if (!isAuthoritativeSuccess) {
+    // Both Supabase and server failed! Rollback local deletion
+    console.error('[ELTStore] Authoritative delete failed. Reconciling and rolling back local state.');
+    unmarkELTDeleted(recordId);
+    eltCache = backupCache;
+    saveLocalELT(backupCache, false);
+    notifyELTListeners(backupCache);
+    debouncedInitSync();
+    return { 
+      success: false, 
+      error: serverResult.error || sbResult.error || 'Authoritative database deletion failed' 
+    };
+  }
+
+  // 7. Authoritative deletion confirmed! Broadcast real-time DELETE event to all connected devices
+  broadcastLabRealtimeEvent('elt_records_change', {
+    deletedId: recordId,
+    action: 'delete',
+    timestamp: Date.now()
+  });
+  if (localELTBus) {
+    try { localELTBus.postMessage({ type: 'elt_change', deletedId: recordId, timestamp: Date.now() }); } catch {}
+  }
+
+  return { success: true };
 }
 
 /**
- * Delete a single BSR record manually
+ * Delete a single BSR record manually.
+ * Calls and awaits Supabase PostgreSQL, Node.js server, and Firestore deletions.
+ * Rolls back local state and returns failure if the authoritative deletion fails.
  */
-export async function deleteBSRRecord(recordId: string): Promise<void> {
+export async function deleteBSRRecord(recordId: string): Promise<{ success: boolean; error?: string }> {
+  if (!recordId) return { success: false, error: 'No record ID specified' };
+
+  const backupCache = [...bsrCache];
+
+  // 1. Tentatively mark as deleted in tombstone set
+  markBSRDeleted(recordId);
+
+  // 2. Remove immediately from local memory cache & localStorage
   const updated = bsrCache.filter(r => r.id !== recordId);
-  saveLocalBSR(updated);
+  saveLocalBSR(updated, false);
   notifyBSRListeners(updated);
 
+  // 3. Call and await Supabase PostgreSQL delete
+  const sbResult = await deleteBSRRecordFromSupabase(recordId);
+
+  // 4. Call and await Node.js Server delete
+  const serverResult = await deleteBSRRecordFromServer(recordId);
+
+  // 5. Call and await Firestore delete if configured
   if (isFirebaseConfigured && db) {
     try {
       await deleteDoc(doc(db, 'bsr_records', recordId));
-    } catch (e) {
-      console.warn(e);
+    } catch (e: any) {
+      console.warn('[BSRStore] Firestore delete error:', e);
     }
   }
+
+  // 6. Evaluate authoritative deletion outcome
+  const isAuthoritativeSuccess = sbResult.success || serverResult.success;
+
+  if (!isAuthoritativeSuccess) {
+    // Both Supabase and server failed! Rollback local deletion
+    console.error('[BSRStore] Authoritative delete failed. Reconciling and rolling back local state.');
+    unmarkBSRDeleted(recordId);
+    bsrCache = backupCache;
+    saveLocalBSR(backupCache, false);
+    notifyBSRListeners(backupCache);
+    debouncedInitSync();
+    return { 
+      success: false, 
+      error: serverResult.error || sbResult.error || 'Authoritative database deletion failed' 
+    };
+  }
+
+  // 7. Authoritative deletion confirmed! Broadcast real-time DELETE event to all connected devices
+  broadcastLabRealtimeEvent('bsr_records_change', {
+    deletedId: recordId,
+    action: 'delete',
+    timestamp: Date.now()
+  });
+  if (localELTBus) {
+    try { localELTBus.postMessage({ type: 'bsr_change', deletedId: recordId, timestamp: Date.now() }); } catch {}
+  }
+
+  return { success: true };
+}
+
+export function getELTRecords(): ELTRecord[] {
+  return [...eltCache];
+}
+
+export function getBSRRecords(): BSRRecord[] {
+  return [...bsrCache];
 }
 
 export function subscribeELTRecords(cb: (records: ELTRecord[]) => void): () => void {

@@ -19,7 +19,11 @@ import {
   Copy,
   Check,
   Tag,
-  User
+  User,
+  Database,
+  X,
+  Code2,
+  ChevronDown
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { 
@@ -31,6 +35,7 @@ import {
   deleteBSRRecord, 
   returnMachineToBSR 
 } from '../../services/eltBsrStore';
+import { SUPABASE_SQL_SCHEMA, IN_OUT_UNITS_SQL_CHANGES } from '../../lib/supabase';
 import * as XLSX from 'xlsx';
 
 interface InOutUnitsModuleProps {
@@ -47,6 +52,7 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
   const [activeTab, setActiveTab] = useState<InOutTab>('ELT_RECORD');
   const [viewMode, setViewMode] = useState<'expanded' | 'table'>('expanded');
   const [copiedSerial, setCopiedSerial] = useState<string | null>(null);
+  const [copiedSql, setCopiedSql] = useState<boolean>(false);
   const [eltRecords, setEltRecords] = useState<ELTRecord[]>([]);
   const [bsrRecords, setBsrRecords] = useState<BSRRecord[]>([]);
   const [searchTerm, setSearchTerm] = useState<string>('');
@@ -67,6 +73,13 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
     setCopiedSerial(serial);
     showToast(`Copied ${serial} to clipboard!`);
     setTimeout(() => setCopiedSerial(null), 2000);
+  };
+
+  const handleCopySyncSql = () => {
+    navigator.clipboard.writeText(SUPABASE_SQL_SCHEMA);
+    setCopiedSql(true);
+    showToast('Copied Supabase SQL Setup script to clipboard! Run in Supabase SQL Editor.', 'success');
+    setTimeout(() => setCopiedSql(false), 3000);
   };
 
   useEffect(() => {
@@ -276,6 +289,24 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
 
             <button
               type="button"
+              onClick={handleCopySyncSql}
+              className={`px-3 py-2.5 rounded-xl border font-bold text-xs flex items-center gap-2 transition-all cursor-pointer shrink-0 ${
+                copiedSql
+                  ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500'
+                  : 'bg-slate-950 hover:bg-slate-800 text-cyan-300 hover:text-white border-cyan-800/60 hover:border-cyan-500'
+              }`}
+              title="Copy Supabase SQL Setup & Realtime Schema for In/Out Units"
+            >
+              {copiedSql ? (
+                <Check className="w-4 h-4 text-emerald-400" />
+              ) : (
+                <Copy className="w-4 h-4 text-cyan-400" />
+              )}
+              <span>{copiedSql ? 'Copied SQL!' : 'Copy SQL Script'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={handleExportExcel}
               className="px-3.5 py-2.5 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 font-bold text-xs flex items-center gap-2 transition-all cursor-pointer shrink-0"
               title="Export all records to Excel (.xlsx)"
@@ -451,9 +482,13 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
                         <button
                           type="button"
                           onClick={async () => {
-                            await deleteELTRecord(r.id);
+                            const res = await deleteELTRecord(r.id);
                             setConfirmDeleteEltId(null);
-                            showToast(`Deleted ELT record: ${r.serialNumber}`);
+                            if (res && !res.success) {
+                              showToast(res.error || `Failed to delete ${r.serialNumber}`, 'error');
+                            } else {
+                              showToast(`Deleted ELT record: ${r.serialNumber}`);
+                            }
                           }}
                           className="px-2 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold cursor-pointer"
                         >
@@ -554,9 +589,13 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
                             <button
                               type="button"
                               onClick={async () => {
-                                await deleteELTRecord(r.id);
+                                const res = await deleteELTRecord(r.id);
                                 setConfirmDeleteEltId(null);
-                                showToast(`Deleted ELT record: ${r.serialNumber}`);
+                                if (res && !res.success) {
+                                  showToast(res.error || `Failed to delete ${r.serialNumber}`, 'error');
+                                } else {
+                                  showToast(`Deleted ELT record: ${r.serialNumber}`);
+                                }
                               }}
                               className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold cursor-pointer transition-colors shadow-sm"
                             >
@@ -714,9 +753,13 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
                         <button
                           type="button"
                           onClick={async () => {
-                            await deleteBSRRecord(r.id);
+                            const res = await deleteBSRRecord(r.id);
                             setConfirmDeleteBsrId(null);
-                            showToast(`Deleted BSR record: ${r.serialNumber}`);
+                            if (res && !res.success) {
+                              showToast(res.error || `Failed to delete ${r.serialNumber}`, 'error');
+                            } else {
+                              showToast(`Deleted BSR record: ${r.serialNumber}`);
+                            }
                           }}
                           className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold cursor-pointer transition-colors shadow-sm"
                         >
@@ -807,9 +850,13 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
                             <button
                               type="button"
                               onClick={async () => {
-                                await deleteBSRRecord(r.id);
+                                const res = await deleteBSRRecord(r.id);
                                 setConfirmDeleteBsrId(null);
-                                showToast(`Deleted BSR record: ${r.serialNumber}`);
+                                if (res && !res.success) {
+                                  showToast(res.error || `Failed to delete ${r.serialNumber}`, 'error');
+                                } else {
+                                  showToast(`Deleted BSR record: ${r.serialNumber}`);
+                                }
                               }}
                               className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold cursor-pointer transition-colors shadow-sm"
                             >

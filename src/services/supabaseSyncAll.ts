@@ -3,6 +3,7 @@ import { getPpUnits } from './ppUnitStore';
 import { getFieldUnits } from './fieldUnitStore';
 import { getUnits } from './unitStore';
 import { getSavedReports } from './reportRoomStore';
+import { getELTRecords, getBSRRecords } from './eltBsrStore';
 import {
   syncProtoUnitToSupabase,
   syncPpUnitToSupabase,
@@ -10,6 +11,8 @@ import {
   syncRDUnitToSupabase,
   syncReportRoomToSupabase,
   syncLeakUnitToSupabase,
+  syncELTRecordToSupabase,
+  syncBSRRecordToSupabase,
   testAllSupabaseTables
 } from '../lib/supabase';
 import { idbGetAll } from '../lib/indexedDbStorage';
@@ -21,6 +24,8 @@ export interface SyncAllSummary {
   rdCount: number;
   smogCount: number;
   reportsCount: number;
+  eltCount: number;
+  bsrCount: number;
   totalSynced: number;
   errors: string[];
   timestamp: string;
@@ -36,6 +41,8 @@ export async function syncAllLocalDataToSupabase(
     rdCount: 0,
     smogCount: 0,
     reportsCount: 0,
+    eltCount: 0,
+    bsrCount: 0,
     totalSynced: 0,
     errors: [],
     timestamp: new Date().toLocaleString()
@@ -127,13 +134,39 @@ export async function syncAllLocalDataToSupabase(
       }
     }
 
+    // 8. In-Out ELT Records
+    onProgress?.('Syncing In-Out ELT Records...');
+    const eltRecords = getELTRecords();
+    for (const elt of eltRecords) {
+      try {
+        await syncELTRecordToSupabase(elt);
+        summary.eltCount++;
+      } catch (e: any) {
+        summary.errors.push(`ELT Record [${elt.serialNumber}]: ${e?.message || 'Error'}`);
+      }
+    }
+
+    // 9. In-Out BSR Records
+    onProgress?.('Syncing In-Out BSR Records...');
+    const bsrRecords = getBSRRecords();
+    for (const bsr of bsrRecords) {
+      try {
+        await syncBSRRecordToSupabase(bsr);
+        summary.bsrCount++;
+      } catch (e: any) {
+        summary.errors.push(`BSR Record [${bsr.serialNumber}]: ${e?.message || 'Error'}`);
+      }
+    }
+
     summary.totalSynced =
       summary.protoCount +
       summary.ppCount +
       summary.fieldCount +
       summary.rdCount +
       summary.smogCount +
-      summary.reportsCount;
+      summary.reportsCount +
+      summary.eltCount +
+      summary.bsrCount;
 
     onProgress?.(`Sync complete! ${summary.totalSynced} items saved.`);
   } catch (globalErr: any) {

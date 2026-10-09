@@ -16,12 +16,15 @@ import {
   Radio,
   Server,
   CloudCheck,
-  ShieldAlert
+  ShieldAlert,
+  Send,
+  RotateCcw
 } from 'lucide-react';
 import {
   testAllSupabaseTables,
   TableTestResult,
-  SUPABASE_SQL_SCHEMA
+  SUPABASE_SQL_SCHEMA,
+  IN_OUT_UNITS_SQL_CHANGES
 } from '../../lib/supabase';
 import { syncAllLocalDataToSupabase, SyncAllSummary } from '../../services/supabaseSyncAll';
 
@@ -40,6 +43,7 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({
   const [syncStatusText, setSyncStatusText] = useState('');
   const [syncSummary, setSyncSummary] = useState<SyncAllSummary | null>(null);
   const [copiedSql, setCopiedSql] = useState(false);
+  const [sqlSubTab, setSqlSubTab] = useState<'inout' | 'all'>('inout');
   const [activeTab, setActiveTab] = useState<'status' | 'sql' | 'guide'>('status');
 
   useEffect(() => {
@@ -60,8 +64,10 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({
     }
   };
 
-  const handleCopySql = () => {
-    navigator.clipboard.writeText(SUPABASE_SQL_SCHEMA);
+  const handleCopySql = (scriptType?: 'inout' | 'all') => {
+    const typeToCopy = scriptType || sqlSubTab;
+    const content = typeToCopy === 'inout' ? IN_OUT_UNITS_SQL_CHANGES : SUPABASE_SQL_SCHEMA;
+    navigator.clipboard.writeText(content);
     setCopiedSql(true);
     setTimeout(() => setCopiedSql(false), 3000);
   };
@@ -86,6 +92,18 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({
   if (!isOpen) return null;
 
   const tableMetadata: Record<string, { label: string; icon: any; color: string; desc: string }> = {
+    elt_records: {
+      label: 'ELT Records',
+      icon: Send,
+      color: 'text-cyan-400',
+      desc: 'In-Out units sent to ELT line'
+    },
+    bsr_records: {
+      label: 'BSR Records',
+      icon: RotateCcw,
+      color: 'text-emerald-400',
+      desc: 'In-Out units returned from BSR'
+    },
     proto_units: {
       label: 'Proto Units',
       icon: Cpu,
@@ -250,7 +268,15 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({
                   {syncSummary.totalSynced} Records Synced
                 </span>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-center text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 text-center text-xs">
+                <div className="p-2 bg-slate-900 rounded-lg border border-cyan-800/50">
+                  <span className="text-[10px] text-cyan-400 block font-bold">ELT</span>
+                  <strong className="text-cyan-300 font-mono text-sm">{syncSummary.eltCount || 0}</strong>
+                </div>
+                <div className="p-2 bg-slate-900 rounded-lg border border-emerald-800/50">
+                  <span className="text-[10px] text-emerald-400 block font-bold">BSR</span>
+                  <strong className="text-emerald-300 font-mono text-sm">{syncSummary.bsrCount || 0}</strong>
+                </div>
                 <div className="p-2 bg-slate-900 rounded-lg border border-slate-800">
                   <span className="text-[10px] text-slate-400 block">Proto</span>
                   <strong className="text-cyan-400 font-mono text-sm">{syncSummary.protoCount}</strong>
@@ -306,7 +332,7 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setActiveTab('sql')}
-                  className="px-3 py-1 rounded-lg bg-cyan-950 text-cyan-300 border border-cyan-800/60 text-xs font-bold hover:bg-cyan-900 transition-colors"
+                  className="px-3 py-1 rounded-lg bg-cyan-950 text-cyan-300 border border-cyan-800/60 text-xs font-bold hover:bg-cyan-900 transition-colors cursor-pointer"
                 >
                   View SQL Script →
                 </button>
@@ -364,7 +390,10 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({
                             </span>
                             <button
                               type="button"
-                              onClick={() => setActiveTab('sql')}
+                              onClick={() => {
+                                setSqlSubTab(tableName.includes('elt') || tableName.includes('bsr') ? 'inout' : 'all');
+                                setActiveTab('sql');
+                              }}
                               className="text-[10px] text-cyan-400 hover:underline mt-1 cursor-pointer font-bold"
                             >
                               Run SQL
@@ -384,7 +413,7 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({
                     <strong className="text-white font-bold block mb-1">
                       Tables not created in Supabase yet?
                     </strong>
-                    Data save hone ke liye Supabase me yeh 6 tables banni zaroori hain. Click karein{' '}
+                    Database me In/Out (ELT, BSR) ya baki tables ka schema create karne ke liye{' '}
                     <button
                       type="button"
                       onClick={() => setActiveTab('sql')}
@@ -392,7 +421,7 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({
                     >
                       "Supabase SQL Script"
                     </button>{' '}
-                    aur Supabase Dashboard ke SQL Editor me 1-click me run kar dein!
+                    par click karein aur Supabase Dashboard ke SQL Editor me 1-click me paste karke run kar dein!
                   </div>
                 </div>
               )}
@@ -401,32 +430,62 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({
 
           {/* TAB 2: SQL SCRIPT */}
           {activeTab === 'sql' && (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-sm font-extrabold text-white">Complete Supabase SQL Script</h3>
-                  <p className="text-xs text-slate-400">
-                    Creates all 6 tables, JSONB columns, indexes, and Row Level Security policies
-                  </p>
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                {/* SQL Sub-tabs toggle */}
+                <div className="flex items-center gap-1.5 p-1 rounded-xl bg-slate-950 border border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setSqlSubTab('inout')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      sqlSubTab === 'inout'
+                        ? 'bg-gradient-to-r from-cyan-600 to-blue-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    1. In/Out Units (ELT & BSR Changes)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSqlSubTab('all')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      sqlSubTab === 'all'
+                        ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    2. Complete Database (All 13 Tables)
+                  </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleCopySql}
-                  className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 shadow-lg transition-all cursor-pointer active:scale-95 ${
-                    copiedSql
-                      ? 'bg-emerald-600 text-white'
-                      : 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-cyan-950'
-                  }`}
-                >
-                  {copiedSql ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                  <span>{copiedSql ? 'Copied to Clipboard!' : 'Copy SQL Script'}</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleCopySql(sqlSubTab)}
+                    className={`px-4 py-2 rounded-xl font-bold text-xs flex items-center gap-2 shadow-lg transition-all cursor-pointer active:scale-95 ${
+                      copiedSql
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-cyan-950'
+                    }`}
+                  >
+                    {copiedSql ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    <span>{copiedSql ? 'Copied to Clipboard!' : sqlSubTab === 'inout' ? 'Copy ELT & BSR SQL' : 'Copy All Tables SQL'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="text-xs text-slate-400 flex items-center justify-between px-1">
+                <span>
+                  {sqlSubTab === 'inout'
+                    ? 'Creates elt_records & bsr_records tables with RLS policies, replica identity full & Realtime publication.'
+                    : 'Complete production schema with all 13 tables, security policies, and performance indexes.'}
+                </span>
+                <span className="text-[10px] font-mono text-cyan-400">Click to Select All</span>
               </div>
 
               <div className="relative">
                 <pre className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-cyan-200/90 font-mono overflow-x-auto max-h-96 leading-relaxed select-all">
-                  {SUPABASE_SQL_SCHEMA}
+                  {sqlSubTab === 'inout' ? IN_OUT_UNITS_SQL_CHANGES : SUPABASE_SQL_SCHEMA}
                 </pre>
               </div>
             </div>

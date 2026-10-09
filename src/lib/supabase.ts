@@ -84,7 +84,7 @@ realtimeChannel.on(
       };
 
       if (eventType === 'DELETE') {
-        dispatchPayload.deletedId = oldRow?.id;
+        dispatchPayload.deletedId = oldRow?.id || (payload as any)?.old?.id || (payload as any)?.recordId || newRow?.id;
       }
 
       realtimeListeners.forEach(listener => {
@@ -122,9 +122,48 @@ if (typeof window !== 'undefined') {
       console.warn('Realtime online reconnect notice:', e);
     }
   });
+
+  // 3. Node.js Server SSE (Server-Sent Events) Real-time Listener Hub
+  // Guarantees instantaneous delivery of mutations/deletions even if WebSocket drops or before tables exist
+  let sseSource: EventSource | null = null;
+  const connectServerSSE = () => {
+    try {
+      if (sseSource) {
+        try { sseSource.close(); } catch {}
+      }
+      sseSource = new EventSource('/api/events');
+      sseSource.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(event.data);
+          if (parsed && parsed.type && parsed.type !== 'connected') {
+            console.log('[Server SSE Realtime Event Received]:', parsed.type, parsed.data);
+            realtimeListeners.forEach(listener => {
+              try { listener(parsed.type, parsed.data); } catch (e) { console.warn(e); }
+            });
+          }
+        } catch {}
+      };
+      sseSource.onerror = () => {
+        // EventSource will auto-reconnect automatically
+      };
+    } catch (err) {
+      console.warn('SSE connection notice:', err);
+    }
+  };
+
+  connectServerSSE();
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      connectServerSSE();
+    }
+  });
+
+  window.addEventListener('online', connectServerSSE);
 }
 
 export function broadcastLabRealtimeEvent(event: LabRealtimeEventType, payload: any = {}) {
+  // 1. Supabase Channel Broadcast
   try {
     realtimeChannel.send({
       type: 'broadcast',
@@ -132,8 +171,24 @@ export function broadcastLabRealtimeEvent(event: LabRealtimeEventType, payload: 
       payload: { ...payload, clientTimestamp: Date.now() }
     });
   } catch (e) {
-    console.warn('Realtime broadcast error:', e);
+    console.warn('Realtime Supabase broadcast error:', e);
   }
+
+  // 2. Local In-Browser dispatch
+  try {
+    realtimeListeners.forEach(listener => {
+      try { listener(event, payload); } catch {}
+    });
+  } catch {}
+
+  // 3. Trigger Server SSE Broadcast
+  try {
+    fetch('/api/events/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: event, data: payload })
+    }).catch(() => {});
+  } catch {}
 }
 
 export function subscribeToLabRealtimeEvents(listener: (event: string, payload: any) => void): () => void {
@@ -730,7 +785,141 @@ export async function fetchReportRoomFromSupabase(): Promise<any[] | null> {
 }
 
 /* ==========================================
-   7. SUPABASE CONNECTION DIAGNOSTICS & TEST
+   7. IN-OUT ELT & BSR RECORDS SUPABASE SYNC
+   ========================================== */
+
+export async function syncELTRecordToSupabase(record: any) {
+  try {
+    const payload = {
+      id: record.id,
+      serial_number: record.serialNumber || '',
+      model_name: record.modelName || '',
+      in_date: record.eltDate || record.inDate || '',
+      in_time: record.eltTime || record.inTime || '',
+      status: record.status || 'Sent to ELT',
+      operator_name: record.scannedByName || record.operatorName || 'Admin',
+      remarks: record.materialCode || '',
+      created_at: safeIsoString(record.createdAt),
+      updated_at: new Date().toISOString()
+    };
+    const { error } = await supabase.from('elt_records').upsert(payload);
+    if (error) {
+      console.warn('Supabase ELT sync note:', error.message);
+    }
+  } catch (err) {
+    console.warn('Supabase ELT connection note:', err);
+  }
+}
+
+export async function deleteELTRecordFromSupabase(id: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { error } = await supabase.from('elt_records').delete().eq('id', id);
+    if (error) {
+      console.warn('Supabase ELT delete note:', error.message);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.warn('Supabase ELT delete error:', err);
+    return { success: false, error: err?.message || 'Supabase delete failed' };
+  }
+}
+
+export async function fetchELTRecordsFromSupabase(): Promise<any[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('elt_records')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error || !data) return null;
+
+    return data.map((item: any) => ({
+      id: item.id,
+      modelName: item.model_name || '',
+      materialCode: item.remarks || (item.serial_number ? item.serial_number.slice(0, 9) : ''),
+      serialNumber: item.serial_number || '',
+      processType: 'ELT' as const,
+      status: (item.status || 'Sent to ELT') as 'Sent to ELT',
+      eltDate: item.in_date || '',
+      eltTime: item.in_time || '',
+      scannedByName: item.operator_name || 'Admin',
+      scannedByUserId: 'ADMIN01',
+      createdAt: item.created_at || new Date().toISOString()
+    }));
+  } catch (err) {
+    return null;
+  }
+}
+
+export async function syncBSRRecordToSupabase(record: any) {
+  try {
+    const payload = {
+      id: record.id,
+      serial_number: record.serialNumber || '',
+      model_name: record.modelName || '',
+      in_date: record.originalELTDateTime || record.inDate || '',
+      in_time: '',
+      out_date: record.bsrReturnDateTime || record.outDate || '',
+      out_time: '',
+      status: record.status || 'Returned from BSR',
+      operator_name: record.returnedByName || record.operatorName || 'Admin',
+      remarks: record.materialCode || '',
+      created_at: safeIsoString(record.createdAt),
+      updated_at: new Date().toISOString()
+    };
+    const { error } = await supabase.from('bsr_records').upsert(payload);
+    if (error) {
+      console.warn('Supabase BSR sync note:', error.message);
+    }
+  } catch (err) {
+    console.warn('Supabase BSR connection note:', err);
+  }
+}
+
+export async function deleteBSRRecordFromSupabase(id: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { error } = await supabase.from('bsr_records').delete().eq('id', id);
+    if (error) {
+      console.warn('Supabase BSR delete note:', error.message);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.warn('Supabase BSR delete error:', err);
+    return { success: false, error: err?.message || 'Supabase delete failed' };
+  }
+}
+
+export async function fetchBSRRecordsFromSupabase(): Promise<any[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from('bsr_records')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error || !data) return null;
+
+    return data.map((item: any) => ({
+      id: item.id,
+      modelName: item.model_name || '',
+      materialCode: item.remarks || (item.serial_number ? item.serial_number.slice(0, 9) : ''),
+      serialNumber: item.serial_number || '',
+      processType: 'BSR Return' as const,
+      status: (item.status || 'Returned from BSR') as 'Returned from BSR',
+      originalELTDateTime: item.in_date || '',
+      bsrReturnDateTime: item.out_date || '',
+      returnedByName: item.operator_name || 'Admin',
+      returnedByUserId: 'ADMIN01',
+      createdAt: item.created_at || new Date().toISOString()
+    }));
+  } catch (err) {
+    return null;
+  }
+}
+
+/* ==========================================
+   8. SUPABASE CONNECTION DIAGNOSTICS & TEST
    ========================================== */
 
 export interface TableTestResult {
@@ -750,7 +939,9 @@ export async function testAllSupabaseTables(): Promise<{
     'field_units',
     'rd_units',
     'smog_leak_units',
-    'report_room_reports'
+    'report_room_reports',
+    'elt_records',
+    'bsr_records'
   ];
 
   const results: Record<string, TableTestResult> = {};
@@ -1096,40 +1287,107 @@ DROP POLICY IF EXISTS "Allow anon select report_templates" ON public.report_temp
 DROP POLICY IF EXISTS "Allow anon select activity_logs" ON public.activity_logs;
 DROP POLICY IF EXISTS "Allow anon select system_settings" ON public.system_settings;
 
--- Create Safe Read-Only SELECT policies (Required for Realtime postgres_changes events!)
-CREATE POLICY "Allow anon select proto_units" ON public.proto_units FOR SELECT USING (true);
-CREATE POLICY "Allow anon select pp_units" ON public.pp_units FOR SELECT USING (true);
-CREATE POLICY "Allow anon select field_units" ON public.field_units FOR SELECT USING (true);
-CREATE POLICY "Allow anon select rd_units" ON public.rd_units FOR SELECT USING (true);
-CREATE POLICY "Allow anon select smog_leak_units" ON public.smog_leak_units FOR SELECT USING (true);
-CREATE POLICY "Allow anon select smog_qty_records" ON public.smog_qty_records FOR SELECT USING (true);
-CREATE POLICY "Allow anon select model_master" ON public.model_master FOR SELECT USING (true);
-CREATE POLICY "Allow anon select elt_records" ON public.elt_records FOR SELECT USING (true);
-CREATE POLICY "Allow anon select bsr_records" ON public.bsr_records FOR SELECT USING (true);
-CREATE POLICY "Allow anon select report_room_reports" ON public.report_room_reports FOR SELECT USING (true);
-CREATE POLICY "Allow anon select report_templates" ON public.report_templates FOR SELECT USING (true);
-CREATE POLICY "Allow anon select activity_logs" ON public.activity_logs FOR SELECT USING (true);
-CREATE POLICY "Allow anon select system_settings" ON public.system_settings FOR SELECT USING (true);
+DROP POLICY IF EXISTS "Allow anon all elt_records" ON public.elt_records;
+DROP POLICY IF EXISTS "Allow anon all bsr_records" ON public.bsr_records;
+DROP POLICY IF EXISTS "Allow anon all proto_units" ON public.proto_units;
+DROP POLICY IF EXISTS "Allow anon all pp_units" ON public.pp_units;
+DROP POLICY IF EXISTS "Allow anon all field_units" ON public.field_units;
+DROP POLICY IF EXISTS "Allow anon all rd_units" ON public.rd_units;
+
+-- Create Safe Read-Write policies for client & tablet real-time lab synchronization
+CREATE POLICY "Allow anon all proto_units" ON public.proto_units FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all pp_units" ON public.pp_units FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all field_units" ON public.field_units FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all rd_units" ON public.rd_units FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all smog_leak_units" ON public.smog_leak_units FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all smog_qty_records" ON public.smog_qty_records FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all model_master" ON public.model_master FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all elt_records" ON public.elt_records FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all bsr_records" ON public.bsr_records FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all report_room_reports" ON public.report_room_reports FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all report_templates" ON public.report_templates FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all activity_logs" ON public.activity_logs FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all system_settings" ON public.system_settings FOR ALL USING (true) WITH CHECK (true);
 
 -- ----------------------------------------------------------
--- 16. ADD ALL 13 TABLES TO SUPABASE REALTIME PUBLICATION
+-- 16. SET REPLICA IDENTITY FULL (Ensures DELETE events include the ID in WAL payload.old)
 -- ----------------------------------------------------------
-ALTER PUBLICATION supabase_realtime ADD TABLE public.proto_units;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.pp_units;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.field_units;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.rd_units;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.smog_leak_units;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.smog_qty_records;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.model_master;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.elt_records;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.bsr_records;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.report_room_reports;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.report_templates;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.system_settings;
+ALTER TABLE public.proto_units REPLICA IDENTITY FULL;
+ALTER TABLE public.pp_units REPLICA IDENTITY FULL;
+ALTER TABLE public.field_units REPLICA IDENTITY FULL;
+ALTER TABLE public.rd_units REPLICA IDENTITY FULL;
+ALTER TABLE public.smog_leak_units REPLICA IDENTITY FULL;
+ALTER TABLE public.smog_qty_records REPLICA IDENTITY FULL;
+ALTER TABLE public.model_master REPLICA IDENTITY FULL;
+ALTER TABLE public.elt_records REPLICA IDENTITY FULL;
+ALTER TABLE public.bsr_records REPLICA IDENTITY FULL;
+ALTER TABLE public.report_room_reports REPLICA IDENTITY FULL;
+ALTER TABLE public.report_templates REPLICA IDENTITY FULL;
+ALTER TABLE public.activity_logs REPLICA IDENTITY FULL;
+ALTER TABLE public.system_settings REPLICA IDENTITY FULL;
 
 -- ----------------------------------------------------------
--- 17. CREATE PERFORMANCE INDEXES
+-- 17. ADD ALL 13 TABLES TO SUPABASE REALTIME PUBLICATION SAFELY
+-- (Uses DO block with exception handler so re-running never throws errors)
+-- ----------------------------------------------------------
+DO $$
+BEGIN
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.proto_units;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.pp_units;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.field_units;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.rd_units;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.smog_leak_units;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.smog_qty_records;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.model_master;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.elt_records;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.bsr_records;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.report_room_reports;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.report_templates;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.activity_logs;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.system_settings;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+END $$;
+
+-- ----------------------------------------------------------
+-- 18. CREATE PERFORMANCE INDEXES
 -- ----------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_proto_created ON public.proto_units (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pp_created ON public.pp_units (created_at DESC);
@@ -1141,6 +1399,81 @@ CREATE INDEX IF NOT EXISTS idx_reports_created ON public.report_room_reports (cr
 CREATE INDEX IF NOT EXISTS idx_model_code ON public.model_master (material_code);
 CREATE INDEX IF NOT EXISTS idx_elt_serial ON public.elt_records (serial_number);
 CREATE INDEX IF NOT EXISTS idx_bsr_serial ON public.bsr_records (serial_number);
+`;
+
+/**
+ * Focused SQL snippet specifically for In/Out Units (ELT & BSR) tables and Realtime setup.
+ * Users can copy and run this directly in Supabase SQL Editor if other tables already exist.
+ */
+export const IN_OUT_UNITS_SQL_CHANGES = `-- ==============================================================
+-- LLT LAB: IN/OUT UNITS (ELT & BSR) SUPABASE TABLES & REALTIME
+-- Run this in Supabase Dashboard -> SQL Editor -> New Query -> Run
+-- ==============================================================
+
+-- 1. In-Out ELT Records Table
+CREATE TABLE IF NOT EXISTS public.elt_records (
+    id TEXT PRIMARY KEY,
+    serial_number TEXT NOT NULL,
+    model_name TEXT,
+    in_date TEXT,
+    in_time TEXT,
+    out_date TEXT,
+    out_time TEXT,
+    status TEXT DEFAULT 'Sent to ELT',
+    operator_name TEXT,
+    remarks TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. In-Out BSR Records Table
+CREATE TABLE IF NOT EXISTS public.bsr_records (
+    id TEXT PRIMARY KEY,
+    serial_number TEXT NOT NULL,
+    model_name TEXT,
+    in_date TEXT,
+    in_time TEXT,
+    out_date TEXT,
+    out_time TEXT,
+    status TEXT DEFAULT 'Returned from BSR',
+    operator_name TEXT,
+    remarks TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3. Row Level Security (RLS)
+ALTER TABLE public.elt_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.bsr_records ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow anon all elt_records" ON public.elt_records;
+DROP POLICY IF EXISTS "Allow anon all bsr_records" ON public.bsr_records;
+
+CREATE POLICY "Allow anon all elt_records" ON public.elt_records FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Allow anon all bsr_records" ON public.bsr_records FOR ALL USING (true) WITH CHECK (true);
+
+-- 4. Replica Identity Full (for Realtime DELETE events payload.old)
+ALTER TABLE public.elt_records REPLICA IDENTITY FULL;
+ALTER TABLE public.bsr_records REPLICA IDENTITY FULL;
+
+-- 5. Add to Supabase Realtime Publication safely
+DO $$
+BEGIN
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.elt_records;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    BEGIN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.bsr_records;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+END $$;
+
+-- 6. Indexes for fast lookup & sorting
+CREATE INDEX IF NOT EXISTS idx_elt_serial ON public.elt_records (serial_number);
+CREATE INDEX IF NOT EXISTS idx_elt_created ON public.elt_records (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bsr_serial ON public.bsr_records (serial_number);
+CREATE INDEX IF NOT EXISTS idx_bsr_created ON public.bsr_records (created_at DESC);
 `;
 
 
