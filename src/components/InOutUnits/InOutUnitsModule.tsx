@@ -53,6 +53,9 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
   const [viewMode, setViewMode] = useState<'expanded' | 'table'>('expanded');
   const [copiedSerial, setCopiedSerial] = useState<string | null>(null);
   const [copiedSql, setCopiedSql] = useState<boolean>(false);
+  const [showCopyModal, setShowCopyModal] = useState<boolean>(false);
+  const [copiedChoice, setCopiedChoice] = useState<string | null>(null);
+  const [sqlPreviewTab, setSqlPreviewTab] = useState<'inout' | 'all'>('inout');
   const [eltRecords, setEltRecords] = useState<ELTRecord[]>([]);
   const [bsrRecords, setBsrRecords] = useState<BSRRecord[]>([]);
   const [searchTerm, setSearchTerm] = useState<string>('');
@@ -76,10 +79,39 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
   };
 
   const handleCopySyncSql = () => {
-    navigator.clipboard.writeText(SUPABASE_SQL_SCHEMA);
+    navigator.clipboard.writeText(IN_OUT_UNITS_SQL_CHANGES);
     setCopiedSql(true);
-    showToast('Copied Supabase SQL Setup script to clipboard! Run in Supabase SQL Editor.', 'success');
+    showToast('Copied In/Out (ELT & BSR) SQL Changes script to clipboard!', 'success');
     setTimeout(() => setCopiedSql(false), 3000);
+  };
+
+  const handleCopyChoice = (type: 'inout_sql' | 'all_sql' | 'elt_json' | 'bsr_json' | 'serials') => {
+    let text = '';
+    let label = '';
+    if (type === 'inout_sql') {
+      text = IN_OUT_UNITS_SQL_CHANGES;
+      label = 'In/Out (ELT & BSR) SQL Script';
+    } else if (type === 'all_sql') {
+      text = SUPABASE_SQL_SCHEMA;
+      label = 'Complete Lab SQL Schema';
+    } else if (type === 'elt_json') {
+      text = JSON.stringify(eltRecords, null, 2);
+      label = `${eltRecords.length} ELT Records (JSON)`;
+    } else if (type === 'bsr_json') {
+      text = JSON.stringify(bsrRecords, null, 2);
+      label = `${bsrRecords.length} BSR Records (JSON)`;
+    } else if (type === 'serials') {
+      const allSerials = [
+        ...eltRecords.map(r => r.serialNumber),
+        ...bsrRecords.map(r => r.serialNumber)
+      ];
+      text = Array.from(new Set(allSerials)).join('\n');
+      label = `${allSerials.length} Serial Numbers`;
+    }
+    navigator.clipboard.writeText(text);
+    setCopiedChoice(type);
+    showToast(`Copied ${label} to clipboard!`, 'success');
+    setTimeout(() => setCopiedChoice(null), 2500);
   };
 
   useEffect(() => {
@@ -287,23 +319,33 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
               </button>
             </div>
 
-            <button
-              type="button"
-              onClick={handleCopySyncSql}
-              className={`px-3 py-2.5 rounded-xl border font-bold text-xs flex items-center gap-2 transition-all cursor-pointer shrink-0 ${
-                copiedSql
-                  ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500'
-                  : 'bg-slate-950 hover:bg-slate-800 text-cyan-300 hover:text-white border-cyan-800/60 hover:border-cyan-500'
-              }`}
-              title="Copy Supabase SQL Setup & Realtime Schema for In/Out Units"
-            >
-              {copiedSql ? (
-                <Check className="w-4 h-4 text-emerald-400" />
-              ) : (
-                <Copy className="w-4 h-4 text-cyan-400" />
-              )}
-              <span>{copiedSql ? 'Copied SQL!' : 'Copy SQL Script'}</span>
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={handleCopySyncSql}
+                className={`px-3 py-2.5 rounded-l-xl border-y border-l font-bold text-xs flex items-center gap-2 transition-all cursor-pointer shrink-0 ${
+                  copiedSql
+                    ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500'
+                    : 'bg-slate-950 hover:bg-slate-800 text-cyan-300 hover:text-white border-cyan-800/60 hover:border-cyan-500'
+                }`}
+                title="1-Click Quick Copy In/Out (ELT & BSR) SQL Changes"
+              >
+                {copiedSql ? (
+                  <Check className="w-4 h-4 text-emerald-400" />
+                ) : (
+                  <Copy className="w-4 h-4 text-cyan-400" />
+                )}
+                <span>{copiedSql ? 'Copied SQL!' : 'Copy SQL Script'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowCopyModal(true)}
+                className="px-2.5 py-2.5 rounded-r-xl border font-bold text-xs bg-slate-950 hover:bg-slate-800 text-slate-300 hover:text-white border-cyan-800/60 hover:border-cyan-500 transition-all cursor-pointer shrink-0"
+                title="All Copy Options (SQL changes, All tables, JSON export, Serials)"
+              >
+                <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+            </div>
 
             <button
               type="button"
@@ -887,6 +929,184 @@ export const InOutUnitsModule: React.FC<InOutUnitsModuleProps> = ({
               </table>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Interactive Copy & SQL Options Modal */}
+      {showCopyModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95">
+            {/* Modal Header */}
+            <div className="p-4 sm:p-5 bg-slate-950 border-b border-slate-800 flex items-center justify-between gap-4 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-2xl bg-gradient-to-tr from-cyan-600 to-blue-600 text-white font-bold shadow-lg shadow-cyan-950">
+                  <Copy className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-white">Copy Options & SQL Setup</h3>
+                  <p className="text-xs text-slate-400">
+                    Copy database scripts, SQL changes, or export active unit data to clipboard
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCopyModal(false)}
+                className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-xl transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-4 sm:p-6 space-y-5 overflow-y-auto">
+              {/* Quick Action Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleCopyChoice('inout_sql')}
+                  className="p-3.5 rounded-2xl bg-slate-950 border border-cyan-800/60 hover:border-cyan-500 text-left transition-all group cursor-pointer hover:bg-slate-900"
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-black text-cyan-300 flex items-center gap-2">
+                      <Code2 className="w-4 h-4 text-cyan-400" />
+                      1. Copy In/Out SQL Changes
+                    </span>
+                    {copiedChoice === 'inout_sql' ? (
+                      <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> Copied!
+                      </span>
+                    ) : (
+                      <Copy className="w-3.5 h-3.5 text-slate-500 group-hover:text-cyan-400" />
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Only <code className="text-cyan-300 font-mono">elt_records</code> & <code className="text-cyan-300 font-mono">bsr_records</code> tables, RLS policies, replica identity full & Realtime.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleCopyChoice('all_sql')}
+                  className="p-3.5 rounded-2xl bg-slate-950 border border-emerald-800/60 hover:border-emerald-500 text-left transition-all group cursor-pointer hover:bg-slate-900"
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-black text-emerald-300 flex items-center gap-2">
+                      <Database className="w-4 h-4 text-emerald-400" />
+                      2. Copy Complete Database SQL
+                    </span>
+                    {copiedChoice === 'all_sql' ? (
+                      <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> Copied!
+                      </span>
+                    ) : (
+                      <Copy className="w-3.5 h-3.5 text-slate-500 group-hover:text-emerald-400" />
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Full production script with all 13 tables, security policies, and indexes.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleCopyChoice('elt_json')}
+                  className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 hover:border-slate-700 text-left transition-all group cursor-pointer hover:bg-slate-900"
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-black text-white flex items-center gap-2">
+                      <Send className="w-4 h-4 text-cyan-400" />
+                      3. Copy ELT Records (JSON)
+                    </span>
+                    {copiedChoice === 'elt_json' ? (
+                      <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> Copied!
+                      </span>
+                    ) : (
+                      <Copy className="w-3.5 h-3.5 text-slate-500 group-hover:text-white" />
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Copies all {eltRecords.length} active ELT machines in structured JSON format.
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleCopyChoice('bsr_json')}
+                  className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 hover:border-slate-700 text-left transition-all group cursor-pointer hover:bg-slate-900"
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-black text-white flex items-center gap-2">
+                      <RotateCcw className="w-4 h-4 text-emerald-400" />
+                      4. Copy BSR Records (JSON)
+                    </span>
+                    {copiedChoice === 'bsr_json' ? (
+                      <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" /> Copied!
+                      </span>
+                    ) : (
+                      <Copy className="w-3.5 h-3.5 text-slate-500 group-hover:text-white" />
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Copies all {bsrRecords.length} active BSR machines in structured JSON format.
+                  </p>
+                </button>
+              </div>
+
+              {/* SQL Viewer & Selector */}
+              <div className="space-y-3 pt-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSqlPreviewTab('inout')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                        sqlPreviewTab === 'inout'
+                          ? 'bg-cyan-950 text-cyan-300 border border-cyan-800'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      In/Out SQL Script
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSqlPreviewTab('all')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                        sqlPreviewTab === 'all'
+                          ? 'bg-cyan-950 text-cyan-300 border border-cyan-800'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Complete Schema SQL
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleCopyChoice(sqlPreviewTab === 'inout' ? 'inout_sql' : 'all_sql')}
+                    className="px-3 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy This Script</span>
+                  </button>
+                </div>
+
+                <pre className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-cyan-200/90 font-mono overflow-x-auto max-h-56 leading-relaxed select-all">
+                  {sqlPreviewTab === 'inout' ? IN_OUT_UNITS_SQL_CHANGES : SUPABASE_SQL_SCHEMA}
+                </pre>
+              </div>
+
+              {/* Instructions */}
+              <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-slate-400 space-y-1">
+                <strong className="text-white font-bold block">Kaise use karein:</strong>
+                <p>1. Upar diya gaya <strong>"Copy In/Out SQL Changes"</strong> button click karein.</p>
+                <p>2. Supabase Dashboard (<span className="text-cyan-300 font-mono">supabase.com/dashboard</span>) me jakar apna project kholein.</p>
+                <p>3. Left menu me <strong>SQL Editor</strong> par click karein aur New Query me paste karke <strong>Run</strong> button dabayein.</p>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

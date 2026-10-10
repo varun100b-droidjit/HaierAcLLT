@@ -1086,14 +1086,6 @@ export async function deleteBSRRecord(recordId: string): Promise<{ success: bool
   return { success: true };
 }
 
-export function getELTRecords(): ELTRecord[] {
-  return [...eltCache];
-}
-
-export function getBSRRecords(): BSRRecord[] {
-  return [...bsrCache];
-}
-
 export function subscribeELTRecords(cb: (records: ELTRecord[]) => void): () => void {
   eltListeners.push(cb);
   cb(eltCache);
